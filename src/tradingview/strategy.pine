@@ -2,31 +2,54 @@
 strategy("BTC/USDT EMA+RSI+Volume Scalping Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04)
 
 // Input parameters
-emaFastLength = input.int(9, "EMA Fast Length", minval=2)
-emaSlowLength = input.int(21, "EMA Slow Length", minval=5)
-rsiLength = input.int(2, "RSI Length", minval=1)
-rsiOversold = input.int(10, "RSI Oversold", maxval=30)
-rsiOverbought = input.int(90, "RSI Overbought", minval=70)
+emaFastLength = input.int(12, "EMA Fast Length", minval=2)
+emaSlowLength = input.int(26, "EMA Slow Length", minval=5)
+emaTrendLength = input.int(200, "EMA Trend Filter Length", minval=50)
+rsiLength = input.int(5, "RSI Length", minval=1)
+rsiOversold = input.int(30, "RSI Oversold", maxval=40)
+rsiOverbought = input.int(70, "RSI Overbought", minval=60)
 volumePeriod = input.int(20, "Volume MA Period", minval=5)
 volumeThreshold = input.float(1.5, "Volume Spike Threshold", minval=1.0, step=0.1)
-stopLossPct = input.float(0.15, "Stop Loss %", minval=0.05, step=0.01) / 100
-takeProfitPct = input.float(0.30, "Take Profit %", minval=0.1, step=0.01) / 100
+
+// ATR-based stop loss/take profit settings
+useAtrStops = input.bool(true, "Use ATR-based Stops")
+atrPeriod = input.int(14, "ATR Period", minval=1)
+atrSlMultiplier = input.float(1.5, "ATR Stop Loss Multiplier", minval=0.5, step=0.1)
+atrTpMultiplier = input.float(3.0, "ATR Take Profit Multiplier", minval=1.0, step=0.1)
+
+// Fixed percentage stops (backup if ATR stops not used)
+stopLossPct = input.float(0.15, "Fixed Stop Loss %", minval=0.05, step=0.01) / 100
+takeProfitPct = input.float(0.30, "Fixed Take Profit %", minval=0.1, step=0.01) / 100
+
+// Trailing stop settings
 useTrailingStop = input.bool(true, "Use Trailing Stop")
 trailActivationPct = input.float(0.15, "Trail Activation %", minval=0.05, step=0.01) / 100
 trailDistancePct = input.float(0.10, "Trail Distance %", minval=0.03, step=0.01) / 100
 
+// Higher timeframe settings
+useHigherTF = input.bool(true, "Use Higher Timeframe Confirmation")
+higherTF = input.timeframe("15", "Higher Timeframe")
+
 // Calculate indicators
 emaFast = ta.ema(close, emaFastLength)
 emaSlow = ta.ema(close, emaSlowLength)
+emaTrend = ta.ema(close, emaTrendLength)
 rsi = ta.rsi(close, rsiLength)
 volumeMA = ta.sma(volume, volumePeriod)
 volumeRatio = volume / volumeMA
 volumeSpike = volumeRatio > volumeThreshold
+atr = ta.atr(atrPeriod)
+
+// Higher timeframe trend
+higherTFemaTrend = request.security(syminfo.tickerid, higherTF, ta.ema(close, emaTrendLength), lookahead=barmerge.lookahead_off)
+higherTFtrend = request.security(syminfo.tickerid, higherTF, close > ta.ema(close, emaTrendLength) ? 1 : -1, lookahead=barmerge.lookahead_off)
 
 // Plot indicators
 plot(emaFast, "EMA Fast", color=color.blue)
 plot(emaSlow, "EMA Slow", color=color.red)
-emaTrend = emaFast > emaSlow ? 1 : -1
+plot(emaTrend, "EMA Trend", color=color.yellow)
+emaCrossover = emaFast > emaSlow ? 1 : -1
+marketTrend = close > emaTrend ? 1 : -1
 
 // RSI panel
 hline(rsiOversold, "RSI Oversold", color=color.green)
@@ -37,21 +60,50 @@ rsiPlot = plot(rsi, "RSI", color=color.purple, display=display.none)
 var float trailPrice = na
 var bool trailActive = false
 
-// Entry signals
-longCondition = emaTrend > 0 and rsi < rsiOversold and volumeSpike
-shortCondition = emaTrend < 0 and rsi > rsiOverbought and volumeSpike
+// Calculate stops based on ATR or fixed percentage
+calculateStops(isLong) =>
+    float slPrice = na
+    float tpPrice = na
+    
+    if useAtrStops
+        if isLong
+            slPrice := close - (atr * atrSlMultiplier)
+            tpPrice := close + (atr * atrTpMultiplier)
+        else
+            slPrice := close + (atr * atrSlMultiplier)
+            tpPrice := close - (atr * atrTpMultiplier)
+    else
+        if isLong
+            slPrice := close * (1 - stopLossPct)
+            tpPrice := close * (1 + takeProfitPct)
+        else
+            slPrice := close * (1 + stopLossPct)
+            tpPrice := close * (1 - takeProfitPct)
+    
+    [slPrice, tpPrice]
+
+// Entry signals with trend filter
+longCondition = marketTrend > 0 and emaCrossover > 0 and rsi < rsiOversold and volumeSpike 
+shortCondition = marketTrend < 0 and emaCrossover < 0 and rsi > rsiOverbought and volumeSpike
+
+// Apply higher timeframe filter if enabled
+if useHigherTF
+    longCondition := longCondition and higherTFtrend > 0
+    shortCondition := shortCondition and higherTFtrend < 0
 
 // Strategy execution
 if (longCondition)
+    [longSL, longTP] = calculateStops(true)
     strategy.entry("Long", strategy.long)
-    strategy.exit("Long TP/SL", "Long", limit=close * (1 + takeProfitPct), stop=close * (1 - stopLossPct))
-    trailPrice := close * (1 - stopLossPct)
+    strategy.exit("Long TP/SL", "Long", limit=longTP, stop=longSL)
+    trailPrice := longSL
     trailActive := false
 
 if (shortCondition)
+    [shortSL, shortTP] = calculateStops(false)
     strategy.entry("Short", strategy.short)
-    strategy.exit("Short TP/SL", "Short", limit=close * (1 - takeProfitPct), stop=close * (1 + stopLossPct))
-    trailPrice := close * (1 + stopLossPct)  
+    strategy.exit("Short TP/SL", "Short", limit=shortTP, stop=shortSL)
+    trailPrice := shortSL
     trailActive := false
 
 // Trailing stop logic
@@ -95,8 +147,20 @@ if (shortPosition and useTrailingStop)
         strategy.close("Short", comment="Trailing Stop")
 
 // Plot signals
+bgcolor(marketTrend > 0 ? color.new(color.green, 95) : color.new(color.red, 95))
 plotshape(longCondition, "Buy Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
 plotshape(shortCondition, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
 
 // Plot trailing stop level when active
-plot(trailActive ? trailPrice : na, "Trailing Stop", color=color.orange, style=plot.style_linebr) 
+plot(trailActive ? trailPrice : na, "Trailing Stop", color=color.orange, style=plot.style_linebr)
+
+// Display current market conditions
+var table marketInfoTable = table.new(position.top_right, 2, 4)
+table.cell(marketInfoTable, 0, 0, "Market Trend", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 0, marketTrend > 0 ? "Bullish" : "Bearish", bgcolor=marketTrend > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
+table.cell(marketInfoTable, 0, 1, "EMA Signal", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 1, emaCrossover > 0 ? "Bullish" : "Bearish", bgcolor=emaCrossover > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
+table.cell(marketInfoTable, 0, 2, "RSI", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 2, str.tostring(rsi, "#.00"), bgcolor=rsi < rsiOversold ? color.new(color.green, 90) : rsi > rsiOverbought ? color.new(color.red, 90) : color.new(color.gray, 90))
+table.cell(marketInfoTable, 0, 3, "Higher TF", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 3, higherTFtrend > 0 ? "Bullish" : "Bearish", bgcolor=higherTFtrend > 0 ? color.new(color.green, 90) : color.new(color.red, 90)) 

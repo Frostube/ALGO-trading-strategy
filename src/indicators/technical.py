@@ -1,7 +1,10 @@
 import pandas as pd
 import numpy as np
 
-from src.config import EMA_FAST, EMA_SLOW, RSI_PERIOD, VOLUME_PERIOD, VOLUME_THRESHOLD
+from src.config import (
+    EMA_FAST, EMA_SLOW, RSI_PERIOD, VOLUME_PERIOD, VOLUME_THRESHOLD,
+    EMA_TREND, ATR_PERIOD, USE_ATR_STOPS
+)
 from src.utils.logger import logger
 
 def apply_indicators(df):
@@ -20,16 +23,17 @@ def apply_indicators(df):
     df = df.copy()
     
     # Apply indicators
-    df = calculate_ema(df, EMA_FAST, EMA_SLOW)
+    df = calculate_ema(df, EMA_FAST, EMA_SLOW, EMA_TREND)
     df = calculate_rsi(df, RSI_PERIOD)
     df = calculate_volume_ma(df, VOLUME_PERIOD)
+    df = calculate_atr(df, ATR_PERIOD)
     
     # Clean up NaN values (indicators typically have NaN at the beginning)
     df = df.dropna()
     
     return df
 
-def calculate_ema(df, fast_period=9, slow_period=21):
+def calculate_ema(df, fast_period=9, slow_period=21, trend_period=200):
     """
     Calculate EMA indicators and crossover.
     
@@ -37,6 +41,7 @@ def calculate_ema(df, fast_period=9, slow_period=21):
         df: DataFrame with OHLCV data
         fast_period: Fast EMA period
         slow_period: Slow EMA period
+        trend_period: Longer-term trend EMA period
         
     Returns:
         DataFrame with EMA indicators added
@@ -45,10 +50,18 @@ def calculate_ema(df, fast_period=9, slow_period=21):
     df[f'ema_{fast_period}'] = df['close'].ewm(span=fast_period, adjust=False).mean()
     df[f'ema_{slow_period}'] = df['close'].ewm(span=slow_period, adjust=False).mean()
     
-    # Calculate crossover signal (1 when fast crosses above slow, -1 when fast crosses below slow, 0 otherwise)
-    df['ema_crossover'] = 0
+    # Calculate long-term trend EMA
+    df[f'ema_{trend_period}'] = df['close'].ewm(span=trend_period, adjust=False).mean()
+    
+    # Determine trend direction (1 for bullish, -1 for bearish)
+    df['ema_trend'] = 0
     df.loc[df[f'ema_{fast_period}'] > df[f'ema_{slow_period}'], 'ema_trend'] = 1
     df.loc[df[f'ema_{fast_period}'] < df[f'ema_{slow_period}'], 'ema_trend'] = -1
+    
+    # Determine long-term trend
+    df['market_trend'] = 0
+    df.loc[df['close'] > df[f'ema_{trend_period}'], 'market_trend'] = 1
+    df.loc[df['close'] < df[f'ema_{trend_period}'], 'market_trend'] = -1
     
     # Detect crossover points
     df['ema_crossover'] = df['ema_trend'].diff().fillna(0)
@@ -85,6 +98,31 @@ def calculate_rsi(df, period=2):
     
     # Clean up temporary columns
     df = df.drop(['price_change', 'gain', 'loss', 'avg_gain', 'avg_loss', 'rs'], axis=1)
+    
+    return df
+
+def calculate_atr(df, period=14):
+    """
+    Calculate Average True Range (ATR) for volatility-based stops.
+    
+    Args:
+        df: DataFrame with OHLCV data
+        period: ATR period
+        
+    Returns:
+        DataFrame with ATR added
+    """
+    # Calculate True Range
+    df['tr1'] = abs(df['high'] - df['low'])
+    df['tr2'] = abs(df['high'] - df['close'].shift())
+    df['tr3'] = abs(df['low'] - df['close'].shift())
+    df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+    
+    # Calculate ATR
+    df['atr'] = df['tr'].rolling(window=period).mean()
+    
+    # Clean up temporary columns
+    df = df.drop(['tr1', 'tr2', 'tr3', 'tr'], axis=1)
     
     return df
 
@@ -132,17 +170,25 @@ def get_signal(df, index=-1):
         'timestamp': row.name,
         'close': row['close'],
         'ema_trend': row['ema_trend'],
+        'market_trend': row.get('market_trend', 0),
         'rsi': row['rsi'],
         'volume_spike': row['volume_spike'],
+        'atr': row.get('atr', None),
         'signal': 'neutral'
     }
     
-    # Long signal: EMA trend is up (fast > slow), RSI is oversold (< 10), and volume spike
-    if row['ema_trend'] > 0 and row['rsi'] < 10 and row['volume_spike']:
+    # Long signal: Market trend is up, EMA trend is up, RSI is oversold, and volume spike
+    if (row['market_trend'] > 0 and 
+        row['ema_trend'] > 0 and 
+        row['rsi'] < RSI_PERIOD * 5 and  # Dynamic RSI threshold based on period
+        row['volume_spike']):
         signal['signal'] = 'buy'
     
-    # Short signal: EMA trend is down (fast < slow), RSI is overbought (> 90), and volume spike
-    elif row['ema_trend'] < 0 and row['rsi'] > 90 and row['volume_spike']:
+    # Short signal: Market trend is down, EMA trend is down, RSI is overbought, and volume spike
+    elif (row['market_trend'] < 0 and 
+          row['ema_trend'] < 0 and 
+          row['rsi'] > 100 - (RSI_PERIOD * 5) and  # Dynamic RSI threshold
+          row['volume_spike']):
         signal['signal'] = 'sell'
     
     return signal 

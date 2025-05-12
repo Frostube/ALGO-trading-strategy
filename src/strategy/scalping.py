@@ -4,7 +4,8 @@ import numpy as np
 
 from src.config import (
     SYMBOL, STOP_LOSS_PCT, TAKE_PROFIT_PCT, RISK_PER_TRADE,
-    RSI_LONG_THRESHOLD, RSI_SHORT_THRESHOLD
+    RSI_LONG_THRESHOLD, RSI_SHORT_THRESHOLD, USE_ATR_STOPS,
+    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER
 )
 from src.indicators.technical import apply_indicators, get_signal
 from src.db.models import Trade
@@ -20,13 +21,15 @@ class ScalpingStrategy:
         self.active_trade = None
         self.consecutive_sl_count = 0
         self.last_signal = None
+        self.higher_tf_trend = None  # Store higher timeframe trend
         
-    def update(self, df):
+    def update(self, df, higher_tf_df=None):
         """
         Update the strategy with new data and generate signals.
         
         Args:
             df: DataFrame with OHLCV data
+            higher_tf_df: Optional DataFrame with higher timeframe data
             
         Returns:
             dict: Current strategy state and signals
@@ -34,8 +37,25 @@ class ScalpingStrategy:
         # Apply indicators to the data
         df_with_indicators = apply_indicators(df)
         
+        # If higher timeframe data is provided, use it for trend confirmation
+        if higher_tf_df is not None:
+            higher_tf_indicators = apply_indicators(higher_tf_df)
+            if not higher_tf_indicators.empty:
+                # Get the latest row
+                latest_higher_tf = higher_tf_indicators.iloc[-1]
+                # Store the higher timeframe trend
+                self.higher_tf_trend = latest_higher_tf['market_trend']
+        
         # Get the latest signal
         signal = get_signal(df_with_indicators)
+        
+        # Override signal if higher timeframe trend doesn't align
+        if self.higher_tf_trend is not None:
+            if signal['signal'] == 'buy' and self.higher_tf_trend <= 0:
+                signal['signal'] = 'neutral'  # No long positions in downtrend
+            elif signal['signal'] == 'sell' and self.higher_tf_trend >= 0:
+                signal['signal'] = 'neutral'  # No short positions in uptrend
+        
         self.last_signal = signal
         
         # Update active trade if exists
@@ -44,7 +64,7 @@ class ScalpingStrategy:
         
         # Check for new trade signals if no active trade
         if not self.active_trade and signal['signal'] != 'neutral':
-            self._open_trade(signal, df_with_indicators.iloc[-1]['close'])
+            self._open_trade(signal, df_with_indicators.iloc[-1])
         
         return {
             'signal': signal,
@@ -79,30 +99,49 @@ class ScalpingStrategy:
             elif current_price <= trade['take_profit']:
                 self._close_trade(current_price, 'take_profit')
     
-    def _open_trade(self, signal, current_price):
+    def _open_trade(self, signal, bar_data):
         """
         Open a new trade based on the signal.
         
         Args:
             signal: Signal dictionary
-            current_price: Current price
+            bar_data: Current bar data with indicators
         """
         if self.active_trade:
             logger.warning("Attempted to open trade while another is active")
             return
         
         side = signal['signal']  # 'buy' or 'sell'
+        current_price = bar_data['close']
+        
+        # Calculate stop loss and take profit levels
+        if USE_ATR_STOPS and 'atr' in bar_data and not pd.isna(bar_data['atr']):
+            # Use ATR-based stops
+            atr_value = bar_data['atr']
+            
+            if side == 'buy':
+                stop_loss_price = current_price - (atr_value * ATR_SL_MULTIPLIER)
+                take_profit_price = current_price + (atr_value * ATR_TP_MULTIPLIER)
+            else:  # sell
+                stop_loss_price = current_price + (atr_value * ATR_SL_MULTIPLIER)
+                take_profit_price = current_price - (atr_value * ATR_TP_MULTIPLIER)
+                
+            logger.info(f"Using ATR-based stops: ATR={atr_value:.2f}, SL={ATR_SL_MULTIPLIER}xATR, TP={ATR_TP_MULTIPLIER}xATR")
+        else:
+            # Fallback to fixed percentage stops
+            stop_loss_price = (
+                current_price * (1 - STOP_LOSS_PCT) if side == 'buy' 
+                else current_price * (1 + STOP_LOSS_PCT)
+            )
+            take_profit_price = (
+                current_price * (1 + TAKE_PROFIT_PCT) if side == 'buy' 
+                else current_price * (1 - TAKE_PROFIT_PCT)
+            )
+            
+            logger.info(f"Using fixed percentage stops: SL={STOP_LOSS_PCT*100:.3f}%, TP={TAKE_PROFIT_PCT*100:.3f}%")
         
         # Calculate position size based on risk per trade
         risk_amount = self.account_balance * RISK_PER_TRADE
-        stop_loss_price = (
-            current_price * (1 - STOP_LOSS_PCT) if side == 'buy' 
-            else current_price * (1 + STOP_LOSS_PCT)
-        )
-        take_profit_price = (
-            current_price * (1 + TAKE_PROFIT_PCT) if side == 'buy' 
-            else current_price * (1 - TAKE_PROFIT_PCT)
-        )
         
         # Calculate the potential loss per unit
         risk_per_unit = abs(current_price - stop_loss_price)
@@ -113,6 +152,11 @@ class ScalpingStrategy:
         # Calculate notional value
         notional_value = position_size * current_price
         
+        # Get market trend and RSI values
+        market_trend = bar_data.get('market_trend', 0)
+        rsi_value = bar_data.get('rsi', None)
+        atr_value = bar_data.get('atr', None)
+        
         # Record the trade
         self.active_trade = {
             'symbol': self.symbol,
@@ -122,7 +166,11 @@ class ScalpingStrategy:
             'amount': position_size,
             'stop_loss': stop_loss_price,
             'take_profit': take_profit_price,
-            'notional_value': notional_value
+            'notional_value': notional_value,
+            'higher_tf_trend': self.higher_tf_trend,
+            'market_trend': market_trend,
+            'rsi': rsi_value,
+            'atr': atr_value
         }
         
         # Log the trade
@@ -136,7 +184,11 @@ class ScalpingStrategy:
             entry_price=current_price,
             amount=position_size,
             stop_loss=stop_loss_price,
-            take_profit=take_profit_price
+            take_profit=take_profit_price,
+            rsi_value=rsi_value,
+            atr_value=atr_value,
+            market_trend=market_trend,
+            higher_tf_trend=self.higher_tf_trend
         )
         self.db_session.add(db_trade)
         self.db_session.commit()
@@ -145,6 +197,9 @@ class ScalpingStrategy:
         self.active_trade['id'] = db_trade.id
         
         logger.info(f"Opened {side} trade at {current_price} with SL: {stop_loss_price}, TP: {take_profit_price}")
+        logger.info(f"Market conditions: RSI={rsi_value:.1f}, ATR={atr_value:.2f}, Trend={'Up' if market_trend > 0 else 'Down'}, Higher TF={'Up' if self.higher_tf_trend > 0 else 'Down' if self.higher_tf_trend < 0 else 'Neutral'}")
+        
+        return self.active_trade
     
     def _close_trade(self, current_price, reason):
         """

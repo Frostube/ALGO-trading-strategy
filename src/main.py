@@ -13,6 +13,7 @@ from src.strategy.scalping import ScalpingStrategy
 from src.execution.trader import Trader
 from src.db.models import init_db, Trade
 from src.utils.logger import logger, log_daily_summary
+from src.config import TIMEFRAME, HIGHER_TIMEFRAME
 
 # Global variables for clean shutdown
 running = True
@@ -132,23 +133,43 @@ async def main(args):
     trader = Trader(db_session, paper_trading=not args.live)
     
     # Fetch initial historical data
-    logger.info("Fetching initial historical data...")
-    historical_data = data_fetcher.fetch_historical_data()
+    logger.info(f"Fetching initial historical data ({TIMEFRAME})...")
+    historical_data = data_fetcher.fetch_historical_data(timeframe=TIMEFRAME)
+    
+    # Fetch higher timeframe data
+    logger.info(f"Fetching higher timeframe data ({HIGHER_TIMEFRAME})...")
+    higher_tf_data = data_fetcher.fetch_historical_data(timeframe=HIGHER_TIMEFRAME)
     
     # Initialize AI feedback timer
     last_ai_feedback = datetime.now()
     
     # Main trading loop
     logger.info("Starting main trading loop...")
-    async for new_candle in data_fetcher.watch_ohlcv():
+    async for new_candle in data_fetcher.watch_ohlcv(timeframe=TIMEFRAME):
         if not running:
             break
         
         # Get the latest data
-        latest_data = data_fetcher.get_latest_data(100)
+        latest_data = data_fetcher.get_latest_data(100, timeframe=TIMEFRAME)
+        
+        # Get the latest higher timeframe data
+        latest_higher_tf_data = data_fetcher.get_latest_data(50, timeframe=HIGHER_TIMEFRAME)
+        
+        logger.debug(f"Processing candle: {latest_data.iloc[-1].name}, " 
+                     f"Higher TF: {latest_higher_tf_data.iloc[-1].name if not latest_higher_tf_data.empty else 'None'}")
         
         # Update strategy with new data
-        strategy_update = strategy.update(latest_data)
+        strategy_update = strategy.update(latest_data, higher_tf_df=latest_higher_tf_data)
+        
+        # Log current market conditions
+        latest_bar = latest_data.iloc[-1]
+        higher_tf_bar = latest_higher_tf_data.iloc[-1] if not latest_higher_tf_data.empty else None
+        
+        logger.debug(f"Market conditions: Price={latest_bar['close']:.2f}, "
+                    f"Signal={strategy_update['signal']['signal']}, "
+                    f"EMA Trend={'Up' if strategy_update['signal']['ema_trend'] > 0 else 'Down'}, "
+                    f"Market Trend={'Up' if strategy_update['signal']['market_trend'] > 0 else 'Down'}, "
+                    f"Higher TF Trend={'Up' if higher_tf_bar is not None and strategy.higher_tf_trend > 0 else 'Down' if higher_tf_bar is not None else 'Unknown'}")
         
         # Update active trades with current price
         current_price = latest_data.iloc[-1]['close']
@@ -194,8 +215,15 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='BTC/USDT Intra-Day Scalper')
     parser.add_argument('--live', action='store_true', help='Run in live trading mode (default: paper trading)')
     parser.add_argument('--balance', type=float, default=10000, help='Initial account balance for paper trading')
+    parser.add_argument('--debug', action='store_true', help='Enable debug logging')
     
     args = parser.parse_args()
+    
+    # Set debug logging if requested
+    if args.debug:
+        import logging
+        logger.setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
     
     # Run the main async function
     asyncio.run(main(args)) 

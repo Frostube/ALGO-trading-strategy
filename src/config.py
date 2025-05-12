@@ -9,6 +9,7 @@ EXCHANGE = 'binance'
 SYMBOL = 'BTC/USDT'
 FUTURES = True
 TIMEFRAME = '1m'
+HIGHER_TIMEFRAME = '5m'  # For multi-timeframe analysis
 
 # API credentials
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
@@ -21,18 +22,23 @@ SLACK_CHANNEL = os.getenv('SLACK_CHANNEL')
 DATABASE_URL = 'sqlite:///data/trading_data.db'
 
 # Indicator parameters
-EMA_FAST = 9
-EMA_SLOW = 21
-RSI_PERIOD = 2
-RSI_LONG_THRESHOLD = 10
-RSI_SHORT_THRESHOLD = 90
+EMA_FAST = 12  # Changed from 9 to 12
+EMA_SLOW = 26  # Changed from 21 to 26
+EMA_TREND = 200  # Long-term trend filter
+RSI_PERIOD = 5  # Changed from 2 to 5
+RSI_LONG_THRESHOLD = 30  # Changed from 10 to 30 (less aggressive entries)
+RSI_SHORT_THRESHOLD = 70  # Changed from 90 to 70 (less aggressive entries)
 VOLUME_PERIOD = 20
 VOLUME_THRESHOLD = 1.5
+ATR_PERIOD = 14  # For volatility-based stop losses
 
 # Risk management settings
 RISK_PER_TRADE = 0.01  # 1% of account per trade
-STOP_LOSS_PCT = 0.0015  # 0.15%
-TAKE_PROFIT_PCT = 0.0030  # 0.30%
+STOP_LOSS_PCT = 0.0015  # 0.15% (fixed percentage, used if USE_ATR_STOPS is False)
+TAKE_PROFIT_PCT = 0.0030  # 0.30% (fixed percentage, used if USE_ATR_STOPS is False)
+USE_ATR_STOPS = True  # Use ATR-based stops instead of fixed percentage
+ATR_SL_MULTIPLIER = 1.5  # Stop loss at 1.5 * ATR
+ATR_TP_MULTIPLIER = 3.0  # Take profit at 3.0 * ATR
 TRAILING_STOP = True
 
 # Backtesting settings

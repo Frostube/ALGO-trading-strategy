@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, Float, String, DateTime, Boolean, create_engine
+from sqlalchemy import Column, Integer, Float, String, DateTime, Boolean, create_engine, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from datetime import datetime
@@ -16,6 +16,7 @@ class OHLCV(Base):
     
     id = Column(Integer, primary_key=True)
     symbol = Column(String, nullable=False)
+    timeframe = Column(String, nullable=False, default='1m')
     timestamp = Column(DateTime, nullable=False)
     open = Column(Float, nullable=False)
     high = Column(Float, nullable=False)
@@ -23,14 +24,20 @@ class OHLCV(Base):
     close = Column(Float, nullable=False)
     volume = Column(Float, nullable=False)
     
+    # Create index for faster queries
+    __table_args__ = (
+        Index('idx_ohlcv_symbol_timeframe_timestamp', 'symbol', 'timeframe', 'timestamp'),
+    )
+    
     def __repr__(self):
-        return f"<OHLCV(symbol='{self.symbol}', timestamp='{self.timestamp}', close={self.close})>"
+        return f"<OHLCV(symbol='{self.symbol}', timeframe='{self.timeframe}', timestamp='{self.timestamp}', close={self.close})>"
     
     @classmethod
-    def from_ccxt(cls, symbol, candle):
+    def from_ccxt(cls, symbol, candle, timeframe='1m'):
         """Create an OHLCV instance from a CCXT candle."""
         return cls(
             symbol=symbol,
+            timeframe=timeframe,
             timestamp=datetime.fromtimestamp(candle[0] / 1000),
             open=candle[1],
             high=candle[2],
@@ -56,6 +63,10 @@ class Trade(Base):
     exit_reason = Column(String, nullable=True)  # 'tp', 'sl', 'manual', etc.
     pnl = Column(Float, nullable=True)
     pnl_percent = Column(Float, nullable=True)
+    rsi_value = Column(Float, nullable=True)
+    atr_value = Column(Float, nullable=True)
+    market_trend = Column(Integer, nullable=True)
+    higher_tf_trend = Column(Integer, nullable=True)
     
     def __repr__(self):
         return f"<Trade(symbol='{self.symbol}', side='{self.side}', entry_price={self.entry_price}, pnl={self.pnl})>"
