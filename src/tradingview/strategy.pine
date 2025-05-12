@@ -322,4 +322,146 @@ table.cell(marketInfoTable, 1, 3, str.tostring(rsi, "#.00"), bgcolor=rsi < rsiLo
 table.cell(marketInfoTable, 0, 4, "Higher TF", bgcolor=color.new(color.blue, 90))
 table.cell(marketInfoTable, 1, 4, higherTFtrend > 0 ? "Bullish" : "Bearish", bgcolor=higherTFtrend > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
 table.cell(marketInfoTable, 0, 5, "Trade Control", bgcolor=color.new(color.blue, 90))
-table.cell(marketInfoTable, 1, 5, str.tostring(barsSinceLastSignal) + " bars / " + str.tostring(tradesThisHour) + " trades", bgcolor=color.new(color.blue, 90)) 
+table.cell(marketInfoTable, 1, 5, str.tostring(barsSinceLastSignal) + " bars / " + str.tostring(tradesThisHour) + " trades", bgcolor=color.new(color.blue, 90))
+
+//-----------------------------------------------------------------------------
+// Enhanced Performance Tracking
+//-----------------------------------------------------------------------------
+
+// Trade statistics tracking
+var int totalTrades = 0
+var int winningTrades = 0
+var int losingTrades = 0
+var float totalProfit = 0.0
+var float totalLoss = 0.0
+var float maxDrawdown = 0.0
+var float peakEquity = strategy.initial_capital
+var float currentDrawdown = 0.0
+var int consecutiveWins = 0
+var int consecutiveLosses = 0
+var int maxConsecutiveWins = 0
+var int maxConsecutiveLosses = 0
+var float lastTradeProfit = 0.0
+var int longTrades = 0
+var int shortTrades = 0
+var int longWins = 0
+var int shortWins = 0
+
+// Trade tracking
+if (strategy.closedtrades > totalTrades)
+    totalTrades := strategy.closedtrades
+    lastTradeProfit := strategy.netprofit - totalProfit - totalLoss
+    
+    if (lastTradeProfit > 0)
+        winningTrades := winningTrades + 1
+        totalProfit := totalProfit + lastTradeProfit
+        consecutiveWins := consecutiveWins + 1
+        consecutiveLosses := 0
+        maxConsecutiveWins := math.max(consecutiveWins, maxConsecutiveWins)
+        
+        // Track trade direction using last trade entry/exit comparison instead of position size
+        if (strategy.closedtrades.entry_price(strategy.closedtrades - 1) < strategy.closedtrades.exit_price(strategy.closedtrades - 1))
+            longWins := longWins + 1
+    else
+        losingTrades := losingTrades + 1
+        totalLoss := totalLoss + math.abs(lastTradeProfit)
+        consecutiveLosses := consecutiveLosses + 1
+        consecutiveWins := 0
+        maxConsecutiveLosses := math.max(consecutiveLosses, maxConsecutiveLosses)
+    
+    // Track trade direction by comparing entry and exit prices instead
+    lastTradeEntryPrice = strategy.closedtrades.entry_price(strategy.closedtrades - 1)
+    lastTradeExitPrice = strategy.closedtrades.exit_price(strategy.closedtrades - 1)
+    
+    if (lastTradeExitPrice > lastTradeEntryPrice)  // Long trade (price went up)
+        longTrades := longTrades + 1
+    else  // Short trade (price went down)
+        shortTrades := shortTrades + 1
+
+// Track equity and drawdown
+if (strategy.equity > peakEquity)
+    peakEquity := strategy.equity
+    currentDrawdown := 0
+else
+    currentDrawdown := (peakEquity - strategy.equity) / peakEquity * 100
+    maxDrawdown := math.max(maxDrawdown, currentDrawdown)
+
+// Calculate key metrics
+var float winRate = 0.0
+var float profitFactor = 0.0
+var float avgWin = 0.0
+var float avgLoss = 0.0
+var float riskRewardRatio = 0.0
+var float expectancy = 0.0
+
+if (totalTrades > 0)
+    winRate := winningTrades / totalTrades * 100
+    
+    if (winningTrades > 0)
+        avgWin := totalProfit / winningTrades
+    
+    if (losingTrades > 0)
+        avgLoss := totalLoss / losingTrades
+    
+    if (avgLoss > 0)
+        riskRewardRatio := avgWin / avgLoss
+    
+    if (totalLoss > 0)
+        profitFactor := totalProfit / totalLoss
+    
+    expectancy := (winRate / 100 * avgWin - (1 - winRate / 100) * avgLoss) / (avgLoss > 0 ? avgLoss : 1)
+
+//-----------------------------------------------------------------------------
+// Performance Reporting Panel
+//-----------------------------------------------------------------------------
+
+// Create performance panel table
+var table perfTable = table.new(position.bottom_right, 5, 6, color.new(color.blue, 90), color.white, 1, color.gray, 1)
+
+// Update performance table
+if (barstate.islast)
+    // Headers
+    table.cell(perfTable, 0, 0, "Metric", bgcolor=color.new(color.blue, 70))
+    table.cell(perfTable, 1, 0, "Value", bgcolor=color.new(color.blue, 70))
+    table.cell(perfTable, 2, 0, "Long", bgcolor=color.new(color.blue, 70))
+    table.cell(perfTable, 3, 0, "Short", bgcolor=color.new(color.blue, 70))
+    table.cell(perfTable, 4, 0, "Current", bgcolor=color.new(color.blue, 70))
+    
+    // Trades & Win Rate
+    table.cell(perfTable, 0, 1, "Trades", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 1, 1, str.tostring(totalTrades), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 2, 1, str.tostring(longTrades), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 3, 1, str.tostring(shortTrades), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 4, 1, strategy.position_size != 0 ? strategy.position_size > 0 ? "LONG" : "SHORT" : "FLAT", 
+               bgcolor=strategy.position_size > 0 ? color.new(color.green, 70) : strategy.position_size < 0 ? color.new(color.red, 70) : color.new(color.gray, 90))
+    
+    // Win Rate
+    table.cell(perfTable, 0, 2, "Win Rate", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 1, 2, str.tostring(winRate, "#.##") + "%", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 2, 2, longTrades > 0 ? str.tostring(longWins / longTrades * 100, "#.##") + "%" : "N/A", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 3, 2, shortTrades > 0 ? str.tostring(shortWins / shortTrades * 100, "#.##") + "%" : "N/A", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 4, 2, "P&L: " + str.tostring(strategy.openprofit, "#.##"), 
+               bgcolor=strategy.openprofit > 0 ? color.new(color.green, 70) : strategy.openprofit < 0 ? color.new(color.red, 70) : color.new(color.gray, 90))
+    
+    // Profit Factor & Risk Metrics
+    table.cell(perfTable, 0, 3, "Profit Factor", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 1, 3, str.tostring(profitFactor, "#.##"), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 2, 3, "R:R Ratio", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 3, 3, str.tostring(riskRewardRatio, "#.##"), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 4, 3, "DD: " + str.tostring(currentDrawdown, "#.##") + "%", 
+               bgcolor=currentDrawdown > 10 ? color.new(color.red, 70) : color.new(color.blue, 90))
+    
+    // Consecutive Trades
+    table.cell(perfTable, 0, 4, "Consec. Wins", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 1, 4, str.tostring(maxConsecutiveWins), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 2, 4, "Consec. Loss", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 3, 4, str.tostring(maxConsecutiveLosses), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 4, 4, "Current: " + str.tostring(consecutiveWins > 0 ? consecutiveWins : -consecutiveLosses), 
+               bgcolor=consecutiveWins > 0 ? color.new(color.green, 70) : color.new(color.red, 70))
+    
+    // Expectancy & Equity
+    table.cell(perfTable, 0, 5, "Expectancy", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 1, 5, str.tostring(expectancy, "#.##"), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 2, 5, "Equity", bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 3, 5, "$" + str.tostring(strategy.equity, "#"), bgcolor=color.new(color.gray, 90))
+    table.cell(perfTable, 4, 5, "Max DD: " + str.tostring(maxDrawdown, "#.##") + "%", bgcolor=color.new(color.red, 90)) 
