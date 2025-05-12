@@ -50,3 +50,8 @@ Thumbs.db
 
 # Project specific
 data/*.csv 
+
+# Strategy test results
+strategy_test_*.png
+strategy_test_*.csv
+*_fixed.py 
