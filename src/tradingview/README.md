@@ -39,6 +39,13 @@ This directory contains the PineScript implementation of our enhanced BTC/USDT s
 - **Market Information Panel**: Displays all strategy indicators
 - **Trade Control Panel**: Shows bars since last signal and trades this hour
 
+### 6. Enhanced Performance Tracking
+- **Real-time Statistics Panel**: Displays key performance metrics during backtesting and paper trading
+- **Direction Analysis**: Shows performance differences between long and short trades
+- **Risk Metrics**: Risk-reward ratio, expectancy, and drawdown tracking
+- **Consecutive Trade Tracking**: Monitors winning and losing streaks
+- **Current Position Stats**: Real-time P&L and position information
+
 ## Strategy Parameters
 
 ### EMAs
