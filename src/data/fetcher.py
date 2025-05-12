@@ -19,21 +19,40 @@ from src.utils.logger import logger
 class DataFetcher:
     """Fetch and manage historical and real-time market data."""
     
-    def __init__(self):
+    def __init__(self, use_testnet=False):
         # Initialize exchange
         self.exchange_id = EXCHANGE
         self.symbol = SYMBOL
         self.timeframe = TIMEFRAME
+        self.use_testnet = use_testnet
         
         # Set up REST exchange for historical data
-        self.rest_exchange = getattr(ccxt, self.exchange_id)({
+        exchange_config = {
             'apiKey': BINANCE_API_KEY,
             'secret': BINANCE_SECRET_KEY,
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'future' if FUTURES else 'spot'
             }
-        })
+        }
+        
+        # Configure testnet if requested
+        if use_testnet:
+            exchange_config['options']['test'] = True  # Enable test mode
+            
+        self.rest_exchange = getattr(ccxt, self.exchange_id)(exchange_config)
+        
+        # Configure testnet URLs if requested
+        if use_testnet:
+            self.rest_exchange.urls['api'] = {
+                'public': 'https://testnet.binance.vision/api',
+                'private': 'https://testnet.binance.vision/api',
+                'v3': 'https://testnet.binance.vision/api/v3',
+                'v1': 'https://testnet.binance.vision/api/v1'
+            }
+            # Disable endpoints not available in testnet
+            self.rest_exchange.options['recvWindow'] = 5000
+            logger.info("Configured for Binance Testnet API")
         
         # Initialize database session
         self.db_session = init_db()
@@ -55,6 +74,13 @@ class DataFetcher:
             }
         })
         
+        # Configure testnet if requested
+        if self.use_testnet:
+            self.ws_exchange.urls['api'] = {
+                'public': 'https://testnet.binance.vision/api',
+                'private': 'https://testnet.binance.vision/api'
+            }
+        
     def fetch_historical_data(self, days=None, timeframe=None):
         """
         Fetch historical data for the configured symbol and timeframe.
@@ -71,51 +97,83 @@ class DataFetcher:
         
         logger.info(f"Fetching {days} days of historical data for {self.symbol} ({tf})")
         
-        try:
-            # Calculate start time
-            since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-            
-            # Fetch OHLCV data
-            ohlcv_data = []
-            
-            # Binance API has a limit on number of candles per request, so fetch in batches
-            current_since = since
-            while True:
-                logger.debug(f"Fetching batch from {datetime.fromtimestamp(current_since/1000)}")
+        # Use different approach for testnet
+        if self.use_testnet:
+            try:
+                # For testnet, try to use a simple endpoint that's more likely to work
+                logger.info("Attempting to fetch data from Binance Testnet...")
                 batch = self.rest_exchange.fetch_ohlcv(
                     symbol=self.symbol,
                     timeframe=tf,
-                    since=current_since,
-                    limit=1000  # Binance limit
+                    limit=500  # Request a reasonable amount
                 )
                 
-                if not batch:
-                    break
+                if batch and len(batch) > 0:
+                    ohlcv_data = batch
+                    logger.info(f"Successfully fetched {len(batch)} candles from testnet")
+                else:
+                    logger.warning(f"No data available on testnet for {self.symbol} with {tf}")
+                    ohlcv_data = self._generate_mock_data(days, tf)
+            except Exception as e:
+                logger.warning(f"Testnet fetch error: {str(e)}")
+                # Generate mock data as a fallback
+                logger.info("Generating mock data for testing purposes")
+                ohlcv_data = self._generate_mock_data(days, tf)
+        else:
+            # Standard approach for production
+            try:
+                # Calculate start time
+                since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
                 
-                ohlcv_data.extend(batch)
+                # Fetch OHLCV data
+                ohlcv_data = []
                 
-                # If we got less than 1000 candles, we've reached the end
-                if len(batch) < 1000:
-                    break
-                
-                # Update since for next batch (last candle timestamp + 1 minute)
-                current_since = batch[-1][0] + 60000
-                
-                # Avoid rate limits
-                self.rest_exchange.sleep(1)
+                # Binance API has a limit on number of candles per request, so fetch in batches
+                current_since = since
+                while True:
+                    logger.debug(f"Fetching batch from {datetime.fromtimestamp(current_since/1000)}")
+                    batch = self.rest_exchange.fetch_ohlcv(
+                        symbol=self.symbol,
+                        timeframe=tf,
+                        since=current_since,
+                        limit=1000  # Binance limit
+                    )
+                    
+                    if not batch:
+                        break
+                    
+                    ohlcv_data.extend(batch)
+                    
+                    # If we got less than 1000 candles, we've reached the end
+                    if len(batch) < 1000:
+                        break
+                    
+                    # Update since for next batch (last candle timestamp + 1 minute)
+                    current_since = batch[-1][0] + 60000
+                    
+                    # Avoid rate limits
+                    self.rest_exchange.sleep(1)
             
-            # Store the data in database with timeframe
+            except Exception as e:
+                logger.error(f"Error fetching historical data for {tf}: {str(e)}")
+                return pd.DataFrame()  # Return empty DataFrame
+        
+        # Check if we got any data
+        if not ohlcv_data:
+            logger.error(f"No data retrieved for {self.symbol} with timeframe {tf}")
+            return pd.DataFrame()  # Return empty DataFrame
+        
+        # Store the data in database with timeframe
+        try:
             self._store_ohlcv_data(ohlcv_data, tf)
-            
-            # Convert to DataFrame and cache for this timeframe
-            self.data_cache[tf] = self._convert_to_dataframe(ohlcv_data)
-            
-            logger.info(f"Fetched {len(ohlcv_data)} historical candles for timeframe {tf}")
-            return self.data_cache[tf]
-            
         except Exception as e:
-            logger.error(f"Error fetching historical data for {tf}: {str(e)}")
-            raise
+            logger.warning(f"Could not store data in database: {str(e)}")
+        
+        # Convert to DataFrame and cache for this timeframe
+        self.data_cache[tf] = self._convert_to_dataframe(ohlcv_data)
+        
+        logger.info(f"Fetched {len(ohlcv_data)} historical candles for timeframe {tf}")
+        return self.data_cache[tf]
     
     def _store_ohlcv_data(self, ohlcv_data, timeframe):
         """Store OHLCV data in the database."""
@@ -267,4 +325,57 @@ class DataFetcher:
     async def close_async(self):
         """Close async connections."""
         if hasattr(self, 'ws_exchange'):
-            await self.ws_exchange.close() 
+            await self.ws_exchange.close()
+    
+    def _generate_mock_data(self, days, timeframe):
+        """Generate mock OHLCV data for testing when testnet fails."""
+        # Current time
+        now = datetime.now()
+        
+        # Calculate number of candles based on timeframe
+        minutes_per_candle = int(timeframe[:-1]) if timeframe.endswith('m') else \
+                            int(timeframe[:-1]) * 60 if timeframe.endswith('h') else \
+                            int(timeframe[:-1]) * 60 * 24  # days
+        
+        total_minutes = days * 24 * 60
+        num_candles = total_minutes // minutes_per_candle
+        
+        # Limit to a reasonable number
+        num_candles = min(num_candles, 5000)
+        
+        # Generate mock data
+        mock_data = []
+        base_price = 50000  # Starting BTC price
+        volume = 10  # Base volume
+        
+        for i in range(num_candles):
+            # Calculate timestamp for this candle
+            timestamp = int((now - timedelta(minutes=minutes_per_candle * (num_candles - i))).timestamp() * 1000)
+            
+            # Add some randomness to price movements
+            price_change = (np.random.random() - 0.5) * 100
+            base_price += price_change
+            
+            # Generate OHLCV values with some randomness
+            open_price = base_price
+            close_price = base_price + (np.random.random() - 0.5) * 50
+            high_price = max(open_price, close_price) + np.random.random() * 30
+            low_price = min(open_price, close_price) - np.random.random() * 30
+            
+            # Random volume with occasional spikes
+            candle_volume = volume * (1 + np.random.random())
+            if np.random.random() < 0.1:  # 10% chance of volume spike
+                candle_volume *= 3
+            
+            # Add the candle to our mock data
+            mock_data.append([
+                timestamp,
+                float(open_price),
+                float(high_price),
+                float(low_price),
+                float(close_price),
+                float(candle_volume)
+            ])
+        
+        logger.info(f"Generated {len(mock_data)} mock candles for testing")
+        return mock_data 

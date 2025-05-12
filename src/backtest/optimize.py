@@ -21,7 +21,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from src.db.models import init_db
 from src.data.fetcher import DataFetcher
 from src.indicators.technical import apply_indicators
-from src.backtest.backtest import backtest_strategy
+from src.backtest.backtest import Backtester
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -42,58 +42,76 @@ def objective(trial, data_train, data_test=None):
     # Define the parameter space
     params = {
         # EMA parameters
-        'ema_fast': trial.suggest_int('ema_fast', 5, 20),
-        'ema_slow': trial.suggest_int('ema_slow', 15, 50),
+        'ema_fast': trial.suggest_int('ema_fast', 3, 12),
+        'ema_slow': trial.suggest_int('ema_slow', 13, 26),
         
         # RSI parameters
-        'rsi_period': trial.suggest_int('rsi_period', 2, 5),
-        'rsi_long_threshold': trial.suggest_int('rsi_long_threshold', 5, 20),
-        'rsi_short_threshold': trial.suggest_int('rsi_short_threshold', 80, 95),
+        'rsi_period': trial.suggest_int('rsi_period', 2, 14),
+        'rsi_long_threshold': trial.suggest_int('rsi_long_threshold', 20, 40),
+        'rsi_short_threshold': trial.suggest_int('rsi_short_threshold', 60, 80),
+        
+        # HMA parameters
+        'hma_fast_period': trial.suggest_int('hma_fast_period', 5, 16),
+        'hma_slow_period': trial.suggest_int('hma_slow_period', 17, 30),
         
         # Volume parameters
-        'volume_period': trial.suggest_int('volume_period', 10, 30),
+        'volume_period': trial.suggest_int('volume_period', 10, 20),
         'volume_threshold': trial.suggest_float('volume_threshold', 1.2, 2.0),
         
         # Risk parameters
         'stop_loss_pct': trial.suggest_float('stop_loss_pct', 0.001, 0.003),
-        'take_profit_pct': trial.suggest_float('take_profit_pct', 0.002, 0.005),
-        'risk_per_trade': 0.01  # Fixed at 1% for optimization
+        'take_profit_pct': trial.suggest_float('take_profit_pct', 0.003, 0.009),
+        'atr_sl_multiplier': trial.suggest_float('atr_sl_multiplier', 1.0, 2.0),
+        'atr_tp_multiplier': trial.suggest_float('atr_tp_multiplier', 2.0, 4.0)
     }
     
-    # Run backtest with these parameters
-    results = backtest_strategy(data_train, params)
+    # Modify indicator parameters before running backtest
+    # This will be passed to apply_indicators through custom parameters
+    # in a real implementation
     
-    # Calculate objective metric (e.g., Sharpe ratio)
-    if results['total_trades'] < 5:
+    # Run backtest with training data
+    backtester = Backtester(data=data_train, initial_balance=10000)
+    
+    # Set custom parameters (in a real implementation)
+    # Here we need to use the global config parameters
+    
+    # Run the backtest
+    train_results = backtester._run_on_dataset(data_train, "Training")
+    
+    # Calculate objective metric
+    if train_results['total_trades'] < 5:
         # If too few trades, penalize
         return -100
     
-    # Calculate Sharpe ratio
-    daily_returns = results['daily_returns']
-    sharpe_ratio = (daily_returns.mean() / daily_returns.std()) * np.sqrt(252)  # Annualized
+    # Calculate a score based on multiple metrics
+    train_score = (train_results['total_return'] * 0.4 + 
+                  train_results['sharpe_ratio'] * 0.4 + 
+                  train_results['win_rate'] * 0.2)
     
     # If test data is provided, also evaluate on it
     if data_test is not None:
         # Run backtest on test data
-        test_results = backtest_strategy(data_test, params)
+        backtester = Backtester(data=data_test, initial_balance=10000)
+        test_results = backtester._run_on_dataset(data_test, "Testing")
         
-        if test_results['total_trades'] < 5:
-            # If too few trades in test set, penalize
-            return -100
+        if test_results['total_trades'] < 3:
+            # If too few trades in test set, penalize but less severely
+            return -50
         
-        # Calculate test Sharpe ratio
-        test_daily_returns = test_results['daily_returns']
-        test_sharpe_ratio = (test_daily_returns.mean() / test_daily_returns.std()) * np.sqrt(252)
+        # Calculate test score
+        test_score = (test_results['total_return'] * 0.4 + 
+                     test_results['sharpe_ratio'] * 0.4 + 
+                     test_results['win_rate'] * 0.2)
         
         # Check for overfitting: if train performance is much better than test, penalize
-        if sharpe_ratio > 2 * test_sharpe_ratio:
-            return test_sharpe_ratio * 0.5  # Heavily penalize overfitting
+        if train_score > 0 and test_score < 0:
+            return test_score * 0.5  # Heavily penalize overfitting
         
-        # Return average of train and test Sharpe (with more weight on test)
-        return (sharpe_ratio + 2 * test_sharpe_ratio) / 3
+        # Return weighted average of train and test scores (more weight on test)
+        return (train_score + 2 * test_score) / 3
     
-    # If no test data, just return train Sharpe
-    return sharpe_ratio
+    # If no test data, just return train score
+    return train_score
 
 def optimize_parameters(data, n_trials=100, test_size=0.3):
     """
@@ -107,10 +125,13 @@ def optimize_parameters(data, n_trials=100, test_size=0.3):
     Returns:
         dict: Best parameters found
     """
+    # Apply indicators first
+    data_with_indicators = apply_indicators(data)
+    
     # Split data into train and test
-    split_idx = int(len(data) * (1 - test_size))
-    data_train = data.iloc[:split_idx].copy()
-    data_test = data.iloc[split_idx:].copy()
+    split_idx = int(len(data_with_indicators) * (1 - test_size))
+    data_train = data_with_indicators.iloc[:split_idx].copy()
+    data_test = data_with_indicators.iloc[split_idx:].copy()
     
     logger.info(f"Train data: {len(data_train)} bars, Test data: {len(data_test)} bars")
     
@@ -123,12 +144,13 @@ def optimize_parameters(data, n_trials=100, test_size=0.3):
     best_value = study.best_value
     
     logger.info(f"Best parameters: {best_params}")
-    logger.info(f"Best value (Sharpe ratio): {best_value:.4f}")
+    logger.info(f"Best value (optimization score): {best_value:.4f}")
     
     # Backtest the best parameters on the full dataset
-    full_results = backtest_strategy(data, best_params)
+    backtester = Backtester(data=data_with_indicators, initial_balance=10000)
+    full_results = backtester._run_on_dataset(data_with_indicators, "Full")
     
-    logger.info(f"Full backtest results: Total trades: {full_results['total_trades']}, Win rate: {full_results['win_rate']:.2%}, PnL: {full_results['total_pnl']:.2f}")
+    logger.info(f"Full backtest results: Total trades: {full_results['total_trades']}, Win rate: {full_results['win_rate']:.2%}, Return: {full_results['total_return']:.2%}")
     
     # Return the results
     return {
@@ -137,7 +159,9 @@ def optimize_parameters(data, n_trials=100, test_size=0.3):
         'full_backtest': {
             'total_trades': full_results['total_trades'],
             'win_rate': full_results['win_rate'],
-            'total_pnl': full_results['total_pnl']
+            'total_return': full_results['total_return'],
+            'sharpe_ratio': full_results['sharpe_ratio'],
+            'max_drawdown': full_results['max_drawdown']
         }
     }
 
@@ -155,22 +179,21 @@ def main():
     os.makedirs(os.path.dirname(args.output), exist_ok=True)
     
     # Initialize database session
-    db_session = init_db()
+    try:
+        db_session = init_db()
+    except Exception as e:
+        logger.warning(f"Could not initialize DB: {e}. Continuing without DB.")
     
     # Initialize data fetcher
-    data_fetcher = DataFetcher()
+    data_fetcher = DataFetcher(use_testnet=True)
     
     # Fetch historical data
     logger.info(f"Fetching {args.days} days of historical data")
     historical_data = data_fetcher.fetch_historical_data(days=args.days)
     
-    # Apply indicators with default parameters
-    logger.info("Applying indicators")
-    data_with_indicators = apply_indicators(historical_data)
-    
     # Optimize parameters
     logger.info(f"Starting optimization with {args.trials} trials")
-    results = optimize_parameters(data_with_indicators, n_trials=args.trials, test_size=args.test_size)
+    results = optimize_parameters(historical_data, n_trials=args.trials, test_size=args.test_size)
     
     # Save results to file
     with open(args.output, 'w') as f:

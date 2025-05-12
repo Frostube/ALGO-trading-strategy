@@ -18,6 +18,9 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from src.db.models import Trade
 from src.config import DATABASE_URL
 
+# Import the backtest dashboard - use relative import since we're in the same package
+from src.dashboard.backtest_dashboard import show_backtest_dashboard
+
 # Remove sqlite:/// prefix for sqlite3.connect
 db_path = DATABASE_URL.replace('sqlite:///', '')
 
@@ -80,7 +83,7 @@ def main():
     st.sidebar.title("Navigation")
     page = st.sidebar.selectbox(
         "Choose a page",
-        ["Overview", "Trade Analysis", "Market Data", "System Settings"]
+        ["Overview", "Trade Analysis", "Market Data", "Backtesting", "System Settings"]
     )
     
     # Auto-refresh
@@ -98,6 +101,8 @@ def main():
         show_trade_analysis_page()
     elif page == "Market Data":
         show_market_data_page()
+    elif page == "Backtesting":
+        show_backtest_dashboard()
     elif page == "System Settings":
         show_system_settings_page()
     

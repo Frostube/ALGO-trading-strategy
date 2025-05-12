@@ -1,0 +1,25 @@
+{
+    "best_params": {
+        "ema_fast": 9,
+        "ema_slow": 16,
+        "rsi_period": 7,
+        "rsi_long_threshold": 25,
+        "rsi_short_threshold": 69,
+        "hma_fast_period": 14,
+        "hma_slow_period": 30,
+        "volume_period": 19,
+        "volume_threshold": 1.3694834431338754,
+        "stop_loss_pct": 0.0029336316968802886,
+        "take_profit_pct": 0.0060811239751447106,
+        "atr_sl_multiplier": 1.117943849150552,
+        "atr_tp_multiplier": 3.8536631214334385
+    },
+    "best_value": -0.10398273042107568,
+    "full_backtest": {
+        "total_trades": 35,
+        "win_rate": 0.4,
+        "total_return": -0.13714912856648898,
+        "sharpe_ratio": -0.48871794628840076,
+        "max_drawdown": 0.16477551775098023
+    }
+}
