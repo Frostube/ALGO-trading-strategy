@@ -1,14 +1,17 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 
 from src.config import (
     SYMBOL, STOP_LOSS_PCT, TAKE_PROFIT_PCT, RISK_PER_TRADE,
     RSI_LONG_THRESHOLD, RSI_SHORT_THRESHOLD, USE_ATR_STOPS,
-    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER
+    ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER, USE_TWO_LEG_STOP,
+    TRAIL_ACTIVATION_PCT, TRAIL_ATR_MULTIPLIER, USE_SOFT_STOP,
+    MAX_TRADES_PER_HOUR, MIN_BARS_BETWEEN_TRADES, MIN_CONSECUTIVE_BARS_AGREE,
+    LOG_FALSE_POSITIVES, MAX_TRADE_DURATION_MINUTES
 )
 from src.indicators.technical import apply_indicators, get_signal
-from src.db.models import Trade
+from src.db.models import Trade, FalsePositive
 from src.utils.logger import logger, log_trade, consecutive_sl_alert
 
 class ScalpingStrategy:
@@ -22,6 +25,10 @@ class ScalpingStrategy:
         self.consecutive_sl_count = 0
         self.last_signal = None
         self.higher_tf_trend = None  # Store higher timeframe trend
+        self.last_signal_time = None  # For trade frequency control
+        self.hourly_trade_count = 0  # For trade frequency control
+        self.hourly_reset_time = datetime.now()  # For trade frequency control
+        self.trailing_activated = False  # For two-leg stop
         
     def update(self, df, higher_tf_df=None):
         """
@@ -46,8 +53,15 @@ class ScalpingStrategy:
                 # Store the higher timeframe trend
                 self.higher_tf_trend = latest_higher_tf['market_trend']
         
-        # Get the latest signal
-        signal = get_signal(df_with_indicators)
+        # Check if it's time to reset the hourly trade counter
+        current_time = datetime.now()
+        if (current_time - self.hourly_reset_time).total_seconds() > 3600:
+            self.hourly_trade_count = 0
+            self.hourly_reset_time = current_time
+        
+        # Get the latest signal, passing the last signal time for trade frequency control
+        signal = get_signal(df_with_indicators, last_signal_time=self.last_signal_time, 
+                           min_bars_between=MIN_BARS_BETWEEN_TRADES)
         
         # Override signal if higher timeframe trend doesn't align
         if self.higher_tf_trend is not None:
@@ -56,15 +70,41 @@ class ScalpingStrategy:
             elif signal['signal'] == 'sell' and self.higher_tf_trend >= 0:
                 signal['signal'] = 'neutral'  # No short positions in uptrend
         
+        # Check if we've reached the maximum trades per hour
+        if self.hourly_trade_count >= MAX_TRADES_PER_HOUR and signal['signal'] != 'neutral':
+            logger.info(f"Maximum trades per hour reached ({MAX_TRADES_PER_HOUR}). Skipping signal.")
+            signal['signal'] = 'neutral'
+        
+        # Check for consecutive bars agreement
+        if signal['signal'] != 'neutral' and MIN_CONSECUTIVE_BARS_AGREE > 1:
+            agree_count = 0
+            for i in range(1, MIN_CONSECUTIVE_BARS_AGREE):
+                if i < len(df_with_indicators):
+                    prev_signal = get_signal(df_with_indicators, index=-1-i)
+                    if prev_signal['signal'] == signal['signal']:
+                        agree_count += 1
+            
+            if agree_count < MIN_CONSECUTIVE_BARS_AGREE - 1:
+                logger.debug(f"Signal doesn't have {MIN_CONSECUTIVE_BARS_AGREE} consecutive bars agreement. Skipping.")
+                signal['signal'] = 'neutral'
+        
         self.last_signal = signal
         
         # Update active trade if exists
         if self.active_trade:
             self._update_active_trade(df_with_indicators.iloc[-1])
+            
+            # Check for false positives (trades that have been open too long)
+            self._check_false_positive_trade()
         
         # Check for new trade signals if no active trade
         if not self.active_trade and signal['signal'] != 'neutral':
             self._open_trade(signal, df_with_indicators.iloc[-1])
+            
+            # Update trading frequency control
+            if self.active_trade:  # If a trade was actually opened
+                self.last_signal_time = signal['timestamp']
+                self.hourly_trade_count += 1
         
         return {
             'signal': signal,
@@ -85,6 +125,67 @@ class ScalpingStrategy:
         if not trade:
             return
         
+        # Check for trailing stop activation
+        if USE_TWO_LEG_STOP and not self.trailing_activated:
+            # Calculate current profit percentage
+            if trade['side'] == 'buy':
+                profit_pct = (current_price - trade['entry_price']) / trade['entry_price']
+            else:
+                profit_pct = (trade['entry_price'] - current_price) / trade['entry_price']
+            
+            # If profit exceeds activation threshold, activate trailing stop
+            if profit_pct >= TRAIL_ACTIVATION_PCT / 100:
+                self.trailing_activated = True
+                
+                # Update stop loss to trailing level based on ATR
+                atr_value = latest_bar.get('atr', None)
+                if atr_value and not pd.isna(atr_value):
+                    if trade['side'] == 'buy':
+                        new_stop = current_price - (atr_value * TRAIL_ATR_MULTIPLIER)
+                        # Only move stop loss up
+                        if new_stop > trade['stop_loss']:
+                            trade['stop_loss'] = new_stop
+                            logger.info(f"Trailing stop activated at {profit_pct*100:.2f}% profit. "
+                                       f"New SL: {new_stop:.2f} ({TRAIL_ATR_MULTIPLIER}x ATR)")
+                    else:  # sell
+                        new_stop = current_price + (atr_value * TRAIL_ATR_MULTIPLIER)
+                        # Only move stop loss down
+                        if new_stop < trade['stop_loss']:
+                            trade['stop_loss'] = new_stop
+                            logger.info(f"Trailing stop activated at {profit_pct*100:.2f}% profit. "
+                                       f"New SL: {new_stop:.2f} ({TRAIL_ATR_MULTIPLIER}x ATR)")
+        
+        # Update trailing stop if already activated
+        elif USE_TWO_LEG_STOP and self.trailing_activated:
+            atr_value = latest_bar.get('atr', None)
+            if atr_value and not pd.isna(atr_value):
+                if trade['side'] == 'buy':
+                    new_stop = current_price - (atr_value * TRAIL_ATR_MULTIPLIER)
+                    # Only move stop loss up
+                    if new_stop > trade['stop_loss']:
+                        trade['stop_loss'] = new_stop
+                        logger.debug(f"Updated trailing stop to {new_stop:.2f}")
+                else:  # sell
+                    new_stop = current_price + (atr_value * TRAIL_ATR_MULTIPLIER)
+                    # Only move stop loss down
+                    if new_stop < trade['stop_loss']:
+                        trade['stop_loss'] = new_stop
+                        logger.debug(f"Updated trailing stop to {new_stop:.2f}")
+        
+        # Check for soft stop alerts
+        if USE_SOFT_STOP:
+            # Calculate distance to stop as percentage
+            if trade['side'] == 'buy':
+                stop_distance_pct = (current_price - trade['stop_loss']) / current_price * 100
+                if stop_distance_pct < 0.05:  # When price is within 0.05% of stop loss
+                    logger.warning(f"Soft stop alert! Price is near stop loss (distance: {stop_distance_pct:.2f}%). "
+                                  f"Current: {current_price:.2f}, SL: {trade['stop_loss']:.2f}")
+            else:  # sell
+                stop_distance_pct = (trade['stop_loss'] - current_price) / current_price * 100
+                if stop_distance_pct < 0.05:  # When price is within 0.05% of stop loss
+                    logger.warning(f"Soft stop alert! Price is near stop loss (distance: {stop_distance_pct:.2f}%). "
+                                  f"Current: {current_price:.2f}, SL: {trade['stop_loss']:.2f}")
+        
         # Check if stop loss or take profit has been hit
         if trade['side'] == 'buy':
             # For long positions
@@ -98,6 +199,55 @@ class ScalpingStrategy:
                 self._close_trade(current_price, 'stop_loss')
             elif current_price <= trade['take_profit']:
                 self._close_trade(current_price, 'take_profit')
+    
+    def _check_false_positive_trade(self):
+        """Check for trades that have been open too long without hitting TP or SL."""
+        if not self.active_trade or not LOG_FALSE_POSITIVES:
+            return
+        
+        # Calculate how long the trade has been open
+        entry_time = self.active_trade['entry_time']
+        current_time = datetime.now()
+        trade_duration = (current_time - entry_time).total_seconds() / 60  # Duration in minutes
+        
+        # If trade has been open longer than threshold, log it as a false positive and close it
+        if trade_duration > MAX_TRADE_DURATION_MINUTES:
+            logger.warning(f"Trade has been open for {trade_duration:.1f} minutes without hitting TP or SL. "
+                          f"Logging as false positive and closing.")
+            
+            # Log false positive
+            self._log_false_positive(self.active_trade, trade_duration)
+            
+            # Close the trade
+            current_price = self.active_trade['last_price'] if 'last_price' in self.active_trade else self.active_trade['entry_price']
+            self._close_trade(current_price, 'timeout')
+    
+    def _log_false_positive(self, trade, duration_minutes):
+        """Log a false positive trade for analysis."""
+        try:
+            # Create false positive record
+            false_positive = FalsePositive(
+                symbol=trade['symbol'],
+                side=trade['side'],
+                entry_time=trade['entry_time'],
+                entry_price=trade['entry_price'],
+                duration_minutes=duration_minutes,
+                market_trend=trade.get('market_trend', None),
+                higher_tf_trend=trade.get('higher_tf_trend', None),
+                rsi_value=trade.get('rsi', None),
+                atr_value=trade.get('atr', None)
+            )
+            
+            # Save to database
+            self.db_session.add(false_positive)
+            self.db_session.commit()
+            
+            logger.info(f"Logged false positive trade: {trade['side']} at {trade['entry_price']}, "
+                       f"duration: {duration_minutes:.1f} minutes")
+            
+        except Exception as e:
+            logger.error(f"Error logging false positive: {str(e)}")
+            self.db_session.rollback()
     
     def _open_trade(self, signal, bar_data):
         """
@@ -170,8 +320,16 @@ class ScalpingStrategy:
             'higher_tf_trend': self.higher_tf_trend,
             'market_trend': market_trend,
             'rsi': rsi_value,
-            'atr': atr_value
+            'atr': atr_value,
+            'last_price': current_price,  # Track last price for false positive handling
+            'adaptive_threshold_used': signal.get('adaptive_threshold_used', False),
+            'micro_trend': signal.get('micro_trend', 0),
+            'momentum_signal': True if side == 'buy' and signal.get('momentum_up', False) 
+                               else True if side == 'sell' and signal.get('momentum_down', False) else False
         }
+        
+        # Reset trailing stop flag
+        self.trailing_activated = False
         
         # Log the trade
         log_trade(self.active_trade)
@@ -188,7 +346,9 @@ class ScalpingStrategy:
             rsi_value=rsi_value,
             atr_value=atr_value,
             market_trend=market_trend,
-            higher_tf_trend=self.higher_tf_trend
+            higher_tf_trend=self.higher_tf_trend,
+            micro_trend=signal.get('micro_trend', 0),
+            momentum_confirmed=self.active_trade['momentum_signal']
         )
         self.db_session.add(db_trade)
         self.db_session.commit()
@@ -197,7 +357,11 @@ class ScalpingStrategy:
         self.active_trade['id'] = db_trade.id
         
         logger.info(f"Opened {side} trade at {current_price} with SL: {stop_loss_price}, TP: {take_profit_price}")
-        logger.info(f"Market conditions: RSI={rsi_value:.1f}, ATR={atr_value:.2f}, Trend={'Up' if market_trend > 0 else 'Down'}, Higher TF={'Up' if self.higher_tf_trend > 0 else 'Down' if self.higher_tf_trend < 0 else 'Neutral'}")
+        logger.info(f"Market conditions: RSI={rsi_value:.1f}, ATR={atr_value:.2f}, "
+                  f"Trend={'Up' if market_trend > 0 else 'Down'}, "
+                  f"Higher TF={'Up' if self.higher_tf_trend > 0 else 'Down' if self.higher_tf_trend < 0 else 'Neutral'}, "
+                  f"Micro-trend={'Up' if signal.get('micro_trend', 0) > 0 else 'Down'}, "
+                  f"Momentum: {'Confirmed' if self.active_trade['momentum_signal'] else 'Not confirmed'}")
         
         return self.active_trade
     
@@ -207,7 +371,7 @@ class ScalpingStrategy:
         
         Args:
             current_price: Current price
-            reason: Reason for closing ('stop_loss', 'take_profit', 'manual', etc.)
+            reason: Reason for closing ('stop_loss', 'take_profit', 'manual', 'timeout', etc.)
         """
         if not self.active_trade:
             logger.warning("Attempted to close trade when none is active")
@@ -231,11 +395,17 @@ class ScalpingStrategy:
             'exit_price': current_price,
             'exit_reason': reason,
             'pnl': pnl,
-            'pnl_percent': pnl_percent
+            'pnl_percent': pnl_percent,
+            'trailing_activated': self.trailing_activated
         }
         
+        # Calculate trade duration
+        trade_duration = (closed_trade['exit_time'] - closed_trade['entry_time']).total_seconds() / 60  # minutes
+        
         # Log trade closing
-        logger.info(f"Closed trade at {current_price} for {reason}, PnL: {pnl}, PnL%: {pnl_percent*100:.2f}%")
+        logger.info(f"Closed trade at {current_price} for {reason}, PnL: {pnl}, PnL%: {pnl_percent*100:.2f}%, "
+                   f"Duration: {trade_duration:.1f} minutes, "
+                   f"Trailing: {'Activated' if self.trailing_activated else 'Not activated'}")
         
         # Track consecutive stop losses
         if reason == 'stop_loss':
@@ -253,13 +423,16 @@ class ScalpingStrategy:
                 trade.exit_reason = reason
                 trade.pnl = pnl
                 trade.pnl_percent = pnl_percent
+                trade.duration_minutes = trade_duration
+                trade.trailing_activated = self.trailing_activated
                 self.db_session.commit()
         except Exception as e:
             logger.error(f"Error updating trade in database: {str(e)}")
             self.db_session.rollback()
         
-        # Reset active trade
+        # Reset active trade and trailing flags
         self.active_trade = None
+        self.trailing_activated = False
         
         return closed_trade
     
