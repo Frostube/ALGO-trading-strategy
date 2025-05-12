@@ -1,0 +1,102 @@
+//@version=5
+strategy("BTC/USDT EMA+RSI+Volume Scalping Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04)
+
+// Input parameters
+emaFastLength = input.int(9, "EMA Fast Length", minval=2)
+emaSlowLength = input.int(21, "EMA Slow Length", minval=5)
+rsiLength = input.int(2, "RSI Length", minval=1)
+rsiOversold = input.int(10, "RSI Oversold", maxval=30)
+rsiOverbought = input.int(90, "RSI Overbought", minval=70)
+volumePeriod = input.int(20, "Volume MA Period", minval=5)
+volumeThreshold = input.float(1.5, "Volume Spike Threshold", minval=1.0, step=0.1)
+stopLossPct = input.float(0.15, "Stop Loss %", minval=0.05, step=0.01) / 100
+takeProfitPct = input.float(0.30, "Take Profit %", minval=0.1, step=0.01) / 100
+useTrailingStop = input.bool(true, "Use Trailing Stop")
+trailActivationPct = input.float(0.15, "Trail Activation %", minval=0.05, step=0.01) / 100
+trailDistancePct = input.float(0.10, "Trail Distance %", minval=0.03, step=0.01) / 100
+
+// Calculate indicators
+emaFast = ta.ema(close, emaFastLength)
+emaSlow = ta.ema(close, emaSlowLength)
+rsi = ta.rsi(close, rsiLength)
+volumeMA = ta.sma(volume, volumePeriod)
+volumeRatio = volume / volumeMA
+volumeSpike = volumeRatio > volumeThreshold
+
+// Plot indicators
+plot(emaFast, "EMA Fast", color=color.blue)
+plot(emaSlow, "EMA Slow", color=color.red)
+emaTrend = emaFast > emaSlow ? 1 : -1
+
+// RSI panel
+hline(rsiOversold, "RSI Oversold", color=color.green)
+hline(rsiOverbought, "RSI Overbought", color=color.red)
+rsiPlot = plot(rsi, "RSI", color=color.purple, display=display.none)
+
+// Trailing stop variables
+var float trailPrice = na
+var bool trailActive = false
+
+// Entry signals
+longCondition = emaTrend > 0 and rsi < rsiOversold and volumeSpike
+shortCondition = emaTrend < 0 and rsi > rsiOverbought and volumeSpike
+
+// Strategy execution
+if (longCondition)
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long TP/SL", "Long", limit=close * (1 + takeProfitPct), stop=close * (1 - stopLossPct))
+    trailPrice := close * (1 - stopLossPct)
+    trailActive := false
+
+if (shortCondition)
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short TP/SL", "Short", limit=close * (1 - takeProfitPct), stop=close * (1 + stopLossPct))
+    trailPrice := close * (1 + stopLossPct)  
+    trailActive := false
+
+// Trailing stop logic
+longPosition = strategy.position_size > 0
+shortPosition = strategy.position_size < 0
+
+if (longPosition and useTrailingStop)
+    // For long positions
+    entryPrice = strategy.position_avg_price
+    profitPct = (close - entryPrice) / entryPrice
+    
+    // Activate trailing stop when profit reaches threshold
+    if (not trailActive and profitPct >= trailActivationPct)
+        trailActive := true
+        trailPrice := close * (1 - trailDistancePct)
+    
+    // Update trailing stop if price moves higher
+    if (trailActive and close * (1 - trailDistancePct) > trailPrice)
+        trailPrice := close * (1 - trailDistancePct)
+    
+    // Execute trailing stop
+    if (trailActive and close <= trailPrice)
+        strategy.close("Long", comment="Trailing Stop")
+
+if (shortPosition and useTrailingStop)
+    // For short positions
+    entryPrice = strategy.position_avg_price
+    profitPct = (entryPrice - close) / entryPrice
+    
+    // Activate trailing stop when profit reaches threshold
+    if (not trailActive and profitPct >= trailActivationPct)
+        trailActive := true
+        trailPrice := close * (1 + trailDistancePct)
+    
+    // Update trailing stop if price moves lower
+    if (trailActive and close * (1 + trailDistancePct) < trailPrice)
+        trailPrice := close * (1 + trailDistancePct)
+    
+    // Execute trailing stop
+    if (trailActive and close >= trailPrice)
+        strategy.close("Short", comment="Trailing Stop")
+
+// Plot signals
+plotshape(longCondition, "Buy Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortCondition, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Plot trailing stop level when active
+plot(trailActive ? trailPrice : na, "Trailing Stop", color=color.orange, style=plot.style_linebr) 

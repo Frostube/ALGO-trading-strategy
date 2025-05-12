@@ -60,7 +60,6 @@ def objective(trial, data_train, data_test=None):
         'risk_per_trade': 0.01  # Fixed at 1% for optimization
     }
     
-    
     # Run backtest with these parameters
     results = backtest_strategy(data_train, params)
     
@@ -180,4 +179,4 @@ def main():
     logger.info(f"Optimization results saved to {args.output}")
 
 if __name__ == "__main__":
-    m
+    main() 
