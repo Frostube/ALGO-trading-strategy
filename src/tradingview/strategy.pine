@@ -1,64 +1,178 @@
 //@version=5
-strategy("BTC/USDT EMA+RSI+Volume Scalping Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04)
+strategy("BTC/USDT Advanced Scalping Strategy", overlay=true, initial_capital=10000, default_qty_type=strategy.percent_of_equity, default_qty_value=100, commission_type=strategy.commission.percent, commission_value=0.04)
 
-// Input parameters
-emaFastLength = input.int(12, "EMA Fast Length", minval=2)
-emaSlowLength = input.int(26, "EMA Slow Length", minval=5)
-emaTrendLength = input.int(200, "EMA Trend Filter Length", minval=50)
-rsiLength = input.int(5, "RSI Length", minval=1)
-rsiOversold = input.int(30, "RSI Oversold", maxval=40)
-rsiOverbought = input.int(70, "RSI Overbought", minval=60)
-volumePeriod = input.int(20, "Volume MA Period", minval=5)
-volumeThreshold = input.float(1.5, "Volume Spike Threshold", minval=1.0, step=0.1)
+//-----------------------------------------------------------------------------
+// Input Parameters
+//-----------------------------------------------------------------------------
+
+// EMA settings
+emaFastLength = input.int(12, "EMA Fast Length", minval=2, group="EMAs")
+emaSlowLength = input.int(26, "EMA Slow Length", minval=5, group="EMAs")
+emaTrendLength = input.int(200, "EMA Trend Length", minval=50, group="EMAs")
+emaMicroTrendLength = input.int(50, "Micro-Trend EMA Length", minval=10, group="EMAs")
+
+// RSI settings
+rsiLength = input.int(5, "RSI Length", minval=1, group="RSI & Volume")
+rsiOversold = input.int(30, "RSI Oversold Threshold", maxval=40, group="RSI & Volume")
+rsiOverbought = input.int(70, "RSI Overbought Threshold", minval=60, group="RSI & Volume")
+
+// Volume settings
+volumePeriod = input.int(20, "Volume MA Period", minval=5, group="RSI & Volume")
+volumeThreshold = input.float(1.5, "Volume Spike Threshold", minval=1.0, step=0.1, group="RSI & Volume")
 
 // ATR-based stop loss/take profit settings
-useAtrStops = input.bool(true, "Use ATR-based Stops")
-atrPeriod = input.int(14, "ATR Period", minval=1)
-atrSlMultiplier = input.float(1.5, "ATR Stop Loss Multiplier", minval=0.5, step=0.1)
-atrTpMultiplier = input.float(3.0, "ATR Take Profit Multiplier", minval=1.0, step=0.1)
+useAtrStops = input.bool(true, "Use ATR-based Stops", group="Risk Management")
+atrPeriod = input.int(14, "ATR Period", minval=1, group="Risk Management")
+atrSlMultiplier = input.float(1.5, "ATR Stop Loss Multiplier", minval=0.5, step=0.1, group="Risk Management")
+atrTpMultiplier = input.float(3.0, "ATR Take Profit Multiplier", minval=1.0, step=0.1, group="Risk Management")
 
 // Fixed percentage stops (backup if ATR stops not used)
-stopLossPct = input.float(0.15, "Fixed Stop Loss %", minval=0.05, step=0.01) / 100
-takeProfitPct = input.float(0.30, "Fixed Take Profit %", minval=0.1, step=0.01) / 100
+stopLossPct = input.float(0.15, "Fixed Stop Loss %", minval=0.05, step=0.01, group="Risk Management") / 100
+takeProfitPct = input.float(0.30, "Fixed Take Profit %", minval=0.1, step=0.01, group="Risk Management") / 100
 
-// Trailing stop settings
-useTrailingStop = input.bool(true, "Use Trailing Stop")
-trailActivationPct = input.float(0.15, "Trail Activation %", minval=0.05, step=0.01) / 100
-trailDistancePct = input.float(0.10, "Trail Distance %", minval=0.03, step=0.01) / 100
+// Two-leg stop settings
+useTwoLegStop = input.bool(true, "Use Two-Leg Stop", group="Trailing Stop")
+trailActivationPct = input.float(0.15, "Trail Activation %", minval=0.05, step=0.01, group="Trailing Stop") / 100
+trailAtrMultiplier = input.float(0.5, "Trail ATR Multiplier", minval=0.1, step=0.1, group="Trailing Stop")
+
+// Adaptive threshold settings
+useAdaptiveThresholds = input.bool(true, "Use Adaptive Thresholds", group="Adaptive Settings")
+adaptiveLookback = input.int(100, "Adaptive Lookback Period", minval=50, group="Adaptive Settings")
 
 // Higher timeframe settings
-useHigherTF = input.bool(true, "Use Higher Timeframe Confirmation")
-higherTF = input.timeframe("15", "Higher Timeframe")
+useHigherTF = input.bool(true, "Use Higher Timeframe Confirmation", group="Multi-Timeframe")
+higherTF = input.timeframe("5", "Higher Timeframe", group="Multi-Timeframe")
 
-// Calculate indicators
+// Overtrading prevention
+minBarsBetweeenTrades = input.int(5, "Min Bars Between Trades", minval=1, group="Overtrading Prevention")
+maxTradesPerHour = input.int(3, "Max Trades Per Hour", minval=1, group="Overtrading Prevention")
+minConsecutiveBarsAgree = input.int(2, "Min Consecutive Bars Agreement", minval=1, group="Overtrading Prevention")
+
+// Momentum confirmation
+useMomentumConfirmation = input.bool(true, "Use Momentum Confirmation", group="Entry Filters")
+momentumLookback = input.int(5, "Momentum Period", minval=2, group="Entry Filters")
+
+//-----------------------------------------------------------------------------
+// Indicator Calculations
+//-----------------------------------------------------------------------------
+
+// EMA calculations
 emaFast = ta.ema(close, emaFastLength)
 emaSlow = ta.ema(close, emaSlowLength)
 emaTrend = ta.ema(close, emaTrendLength)
+emaMicroTrend = ta.ema(close, emaMicroTrendLength)
+
+// Calculate micro-trend slope (positive: uptrend, negative: downtrend)
+emaMicroSlope = ta.change(emaMicroTrend, 5) / 5
+emaMicroDirection = emaMicroSlope > 0 ? 1 : -1
+
+// RSI calculation
 rsi = ta.rsi(close, rsiLength)
+
+// Volume indicators
 volumeMA = ta.sma(volume, volumePeriod)
 volumeRatio = volume / volumeMA
 volumeSpike = volumeRatio > volumeThreshold
+
+// ATR calculation
 atr = ta.atr(atrPeriod)
+atrPct = atr / close * 100
 
 // Higher timeframe trend
 higherTFemaTrend = request.security(syminfo.tickerid, higherTF, ta.ema(close, emaTrendLength), lookahead=barmerge.lookahead_off)
 higherTFtrend = request.security(syminfo.tickerid, higherTF, close > ta.ema(close, emaTrendLength) ? 1 : -1, lookahead=barmerge.lookahead_off)
 
-// Plot indicators
-plot(emaFast, "EMA Fast", color=color.blue)
-plot(emaSlow, "EMA Slow", color=color.red)
-plot(emaTrend, "EMA Trend", color=color.yellow)
+// Trend signals
 emaCrossover = emaFast > emaSlow ? 1 : -1
 marketTrend = close > emaTrend ? 1 : -1
 
-// RSI panel
-hline(rsiOversold, "RSI Oversold", color=color.green)
-hline(rsiOverbought, "RSI Overbought", color=color.red)
-rsiPlot = plot(rsi, "RSI", color=color.purple, display=display.none)
+// Momentum confirmation
+prev5High = ta.highest(high[1], momentumLookback)
+prev5Low = ta.lowest(low[1], momentumLookback)
+momentumUp = close > prev5High
+momentumDown = close < prev5Low
 
-// Trailing stop variables
-var float trailPrice = na
-var bool trailActive = false
+// Adaptive thresholds
+var float rsiLowerThreshold = rsiOversold
+var float rsiUpperThreshold = rsiOverbought
+var float adaptiveVolumeThreshold = volumeThreshold
+
+// Use ta.percentrank which is available in TradingView
+if useAdaptiveThresholds
+    // For RSI lower threshold (10th percentile) - find the value below which RSI spends 10% of the time
+    rsiSeries = ta.lowest(rsi, adaptiveLookback) + (ta.highest(rsi, adaptiveLookback) - ta.lowest(rsi, adaptiveLookback)) * 0.1
+    rsiLowerThreshold := math.max(5, rsiSeries)  // Set minimum to avoid extreme values
+    
+    // For RSI upper threshold (90th percentile) - find the value below which RSI spends 90% of the time
+    rsiUpperSeries = ta.lowest(rsi, adaptiveLookback) + (ta.highest(rsi, adaptiveLookback) - ta.lowest(rsi, adaptiveLookback)) * 0.9
+    rsiUpperThreshold := math.min(95, rsiUpperSeries)  // Set maximum to avoid extreme values
+    
+    // For volume threshold (80th percentile)
+    volumeSeries = ta.lowest(volumeRatio, adaptiveLookback) + (ta.highest(volumeRatio, adaptiveLookback) - ta.lowest(volumeRatio, adaptiveLookback)) * 0.8
+    adaptiveVolumeThreshold := volumeSeries
+
+// Overtrading prevention
+var int barsSinceLastSignal = 999
+var int tradesThisHour = 0
+var int lastHour = -1
+var bool[] conditionHistory = array.new_bool(minConsecutiveBarsAgree, false)
+var bool[] shortConditionHistory = array.new_bool(minConsecutiveBarsAgree, false)
+
+// Update bars since last signal
+barsSinceLastSignal := barsSinceLastSignal + 1
+
+// Reset hourly trade counter if hour changes
+if hour(time) != lastHour
+    tradesThisHour := 0
+    lastHour := hour(time)
+
+//-----------------------------------------------------------------------------
+// Entry Condition Logic
+//-----------------------------------------------------------------------------
+
+// Base conditions
+baseLongCondition = marketTrend > 0 and emaCrossover > 0 and (useAdaptiveThresholds ? rsi < rsiLowerThreshold : rsi < rsiOversold) and (useAdaptiveThresholds ? volumeRatio > adaptiveVolumeThreshold : volumeSpike)
+baseShortCondition = marketTrend < 0 and emaCrossover < 0 and (useAdaptiveThresholds ? rsi > rsiUpperThreshold : rsi > rsiOverbought) and (useAdaptiveThresholds ? volumeRatio > adaptiveVolumeThreshold : volumeSpike)
+
+// Apply micro-trend filter
+if emaMicroDirection > 0
+    baseShortCondition := false
+if emaMicroDirection < 0
+    baseLongCondition := false
+
+// Apply momentum confirmation
+if useMomentumConfirmation
+    baseLongCondition := baseLongCondition and momentumUp
+    baseShortCondition := baseShortCondition and momentumDown
+
+// Apply higher timeframe filter if enabled
+if useHigherTF
+    baseLongCondition := baseLongCondition and higherTFtrend > 0
+    baseShortCondition := baseShortCondition and higherTFtrend < 0
+
+// Update condition history arrays
+array.push(conditionHistory, baseLongCondition)
+array.push(shortConditionHistory, baseShortCondition)
+if array.size(conditionHistory) > minConsecutiveBarsAgree
+    array.shift(conditionHistory)
+if array.size(shortConditionHistory) > minConsecutiveBarsAgree
+    array.shift(shortConditionHistory)
+
+// Check for consecutive bar agreement
+consecutiveLongAgree = true
+consecutiveShortAgree = true
+for i = 0 to array.size(conditionHistory) - 1
+    consecutiveLongAgree := consecutiveLongAgree and array.get(conditionHistory, i)
+for i = 0 to array.size(shortConditionHistory) - 1
+    consecutiveShortAgree := consecutiveShortAgree and array.get(shortConditionHistory, i)
+
+// Final conditions with overtrading prevention
+longCondition = baseLongCondition and barsSinceLastSignal >= minBarsBetweeenTrades and tradesThisHour < maxTradesPerHour and consecutiveLongAgree
+shortCondition = baseShortCondition and barsSinceLastSignal >= minBarsBetweeenTrades and tradesThisHour < maxTradesPerHour and consecutiveShortAgree
+
+//-----------------------------------------------------------------------------
+// Stop Loss & Take Profit Logic
+//-----------------------------------------------------------------------------
 
 // Calculate stops based on ATR or fixed percentage
 calculateStops(isLong) =>
@@ -82,35 +196,44 @@ calculateStops(isLong) =>
     
     [slPrice, tpPrice]
 
-// Entry signals with trend filter
-longCondition = marketTrend > 0 and emaCrossover > 0 and rsi < rsiOversold and volumeSpike 
-shortCondition = marketTrend < 0 and emaCrossover < 0 and rsi > rsiOverbought and volumeSpike
+//-----------------------------------------------------------------------------
+// Trailing Stop Logic
+//-----------------------------------------------------------------------------
 
-// Apply higher timeframe filter if enabled
-if useHigherTF
-    longCondition := longCondition and higherTFtrend > 0
-    shortCondition := shortCondition and higherTFtrend < 0
+// Trailing stop variables
+var float trailPrice = na
+var bool trailActive = false
+var float trailStopDistance = na
 
-// Strategy execution
+//-----------------------------------------------------------------------------
+// Strategy Execution
+//-----------------------------------------------------------------------------
+
 if (longCondition)
     [longSL, longTP] = calculateStops(true)
     strategy.entry("Long", strategy.long)
     strategy.exit("Long TP/SL", "Long", limit=longTP, stop=longSL)
+    barsSinceLastSignal := 0
+    tradesThisHour := tradesThisHour + 1
     trailPrice := longSL
     trailActive := false
+    trailStopDistance := atr * trailAtrMultiplier
 
 if (shortCondition)
     [shortSL, shortTP] = calculateStops(false)
     strategy.entry("Short", strategy.short)
     strategy.exit("Short TP/SL", "Short", limit=shortTP, stop=shortSL)
+    barsSinceLastSignal := 0
+    tradesThisHour := tradesThisHour + 1
     trailPrice := shortSL
     trailActive := false
+    trailStopDistance := atr * trailAtrMultiplier
 
-// Trailing stop logic
+// Two-leg stop logic
 longPosition = strategy.position_size > 0
 shortPosition = strategy.position_size < 0
 
-if (longPosition and useTrailingStop)
+if (longPosition and useTwoLegStop)
     // For long positions
     entryPrice = strategy.position_avg_price
     profitPct = (close - entryPrice) / entryPrice
@@ -118,17 +241,17 @@ if (longPosition and useTrailingStop)
     // Activate trailing stop when profit reaches threshold
     if (not trailActive and profitPct >= trailActivationPct)
         trailActive := true
-        trailPrice := close * (1 - trailDistancePct)
+        trailPrice := close - trailStopDistance
     
     // Update trailing stop if price moves higher
-    if (trailActive and close * (1 - trailDistancePct) > trailPrice)
-        trailPrice := close * (1 - trailDistancePct)
+    if (trailActive and close - trailStopDistance > trailPrice)
+        trailPrice := close - trailStopDistance
     
     // Execute trailing stop
     if (trailActive and close <= trailPrice)
         strategy.close("Long", comment="Trailing Stop")
 
-if (shortPosition and useTrailingStop)
+if (shortPosition and useTwoLegStop)
     // For short positions
     entryPrice = strategy.position_avg_price
     profitPct = (entryPrice - close) / entryPrice
@@ -136,31 +259,67 @@ if (shortPosition and useTrailingStop)
     // Activate trailing stop when profit reaches threshold
     if (not trailActive and profitPct >= trailActivationPct)
         trailActive := true
-        trailPrice := close * (1 + trailDistancePct)
+        trailPrice := close + trailStopDistance
     
     // Update trailing stop if price moves lower
-    if (trailActive and close * (1 + trailDistancePct) < trailPrice)
-        trailPrice := close * (1 + trailDistancePct)
+    if (trailActive and close + trailStopDistance < trailPrice)
+        trailPrice := close + trailStopDistance
     
     // Execute trailing stop
     if (trailActive and close >= trailPrice)
         strategy.close("Short", comment="Trailing Stop")
 
-// Plot signals
+//-----------------------------------------------------------------------------
+// Visualization
+//-----------------------------------------------------------------------------
+
+// Plot EMAs
+plot(emaFast, "EMA Fast", color=color.blue, linewidth=1)
+plot(emaSlow, "EMA Slow", color=color.red, linewidth=1)
+plot(emaTrend, "EMA Trend", color=color.yellow, linewidth=1)
+plot(emaMicroTrend, "EMA Micro-Trend", color=color.purple, linewidth=1)
+
+// Plot market background
 bgcolor(marketTrend > 0 ? color.new(color.green, 95) : color.new(color.red, 95))
+
+// Plot trading signals
 plotshape(longCondition, "Buy Signal", shape.triangleup, location.belowbar, color.green, size=size.small)
 plotshape(shortCondition, "Sell Signal", shape.triangledown, location.abovebar, color.red, size=size.small)
 
 // Plot trailing stop level when active
-plot(trailActive ? trailPrice : na, "Trailing Stop", color=color.orange, style=plot.style_linebr)
+plot(trailActive ? trailPrice : na, "Trailing Stop", color=color.orange, style=plot.style_linebr, linewidth=2)
+
+// Plot momentum confirmation levels
+plot(useMomentumConfirmation ? prev5High : na, "Momentum High", color=color.new(color.green, 70), style=plot.style_circles)
+plot(useMomentumConfirmation ? prev5Low : na, "Momentum Low", color=color.new(color.red, 70), style=plot.style_circles)
+
+//-----------------------------------------------------------------------------
+// Information Display
+//-----------------------------------------------------------------------------
+
+// Display adaptive thresholds
+var table adaptiveTable = table.new(position.top_left, 2, 4)
+if useAdaptiveThresholds
+    table.cell(adaptiveTable, 0, 0, "Adaptive Thresholds", bgcolor=color.new(color.blue, 90))
+    table.cell(adaptiveTable, 1, 0, "Value", bgcolor=color.new(color.blue, 90))
+    table.cell(adaptiveTable, 0, 1, "RSI Lower", bgcolor=color.new(color.blue, 90))
+    table.cell(adaptiveTable, 1, 1, str.tostring(rsiLowerThreshold, "#.00"), bgcolor=color.new(color.blue, 90))
+    table.cell(adaptiveTable, 0, 2, "RSI Upper", bgcolor=color.new(color.blue, 90))
+    table.cell(adaptiveTable, 1, 2, str.tostring(rsiUpperThreshold, "#.00"), bgcolor=color.new(color.blue, 90))
+    table.cell(adaptiveTable, 0, 3, "Volume Threshold", bgcolor=color.new(color.blue, 90))
+    table.cell(adaptiveTable, 1, 3, str.tostring(adaptiveVolumeThreshold, "#.00"), bgcolor=color.new(color.blue, 90))
 
 // Display current market conditions
-var table marketInfoTable = table.new(position.top_right, 2, 4)
+var table marketInfoTable = table.new(position.top_right, 2, 6)
 table.cell(marketInfoTable, 0, 0, "Market Trend", bgcolor=color.new(color.blue, 90))
 table.cell(marketInfoTable, 1, 0, marketTrend > 0 ? "Bullish" : "Bearish", bgcolor=marketTrend > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
 table.cell(marketInfoTable, 0, 1, "EMA Signal", bgcolor=color.new(color.blue, 90))
 table.cell(marketInfoTable, 1, 1, emaCrossover > 0 ? "Bullish" : "Bearish", bgcolor=emaCrossover > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
-table.cell(marketInfoTable, 0, 2, "RSI", bgcolor=color.new(color.blue, 90))
-table.cell(marketInfoTable, 1, 2, str.tostring(rsi, "#.00"), bgcolor=rsi < rsiOversold ? color.new(color.green, 90) : rsi > rsiOverbought ? color.new(color.red, 90) : color.new(color.gray, 90))
-table.cell(marketInfoTable, 0, 3, "Higher TF", bgcolor=color.new(color.blue, 90))
-table.cell(marketInfoTable, 1, 3, higherTFtrend > 0 ? "Bullish" : "Bearish", bgcolor=higherTFtrend > 0 ? color.new(color.green, 90) : color.new(color.red, 90)) 
+table.cell(marketInfoTable, 0, 2, "Micro-Trend", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 2, emaMicroDirection > 0 ? "Bullish" : "Bearish", bgcolor=emaMicroDirection > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
+table.cell(marketInfoTable, 0, 3, "RSI", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 3, str.tostring(rsi, "#.00"), bgcolor=rsi < rsiLowerThreshold ? color.new(color.green, 90) : rsi > rsiUpperThreshold ? color.new(color.red, 90) : color.new(color.gray, 90))
+table.cell(marketInfoTable, 0, 4, "Higher TF", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 4, higherTFtrend > 0 ? "Bullish" : "Bearish", bgcolor=higherTFtrend > 0 ? color.new(color.green, 90) : color.new(color.red, 90))
+table.cell(marketInfoTable, 0, 5, "Trade Control", bgcolor=color.new(color.blue, 90))
+table.cell(marketInfoTable, 1, 5, str.tostring(barsSinceLastSignal) + " bars / " + str.tostring(tradesThisHour) + " trades", bgcolor=color.new(color.blue, 90)) 
