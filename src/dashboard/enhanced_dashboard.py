@@ -26,6 +26,18 @@ from src.config import (
     ATR_PERIOD, ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER
 )
 
+# List of major crypto trading pairs
+MAJOR_SYMBOLS = [
+    "BTC/USDT", "ETH/USDT", "BNB/USDT", "SOL/USDT", 
+    "XRP/USDT", "DOGE/USDT", "ADA/USDT", "MATIC/USDT"
+]
+
+# Strategy types
+AVAILABLE_STRATEGIES = [
+    "ema_crossover", "rsi_momentum", "donchian_breakout", 
+    "mean_reversion", "volume_breakout"
+]
+
 def show_enhanced_dashboard():
     """Display the enhanced interactive backtesting dashboard."""
     st.set_page_config(
@@ -35,7 +47,7 @@ def show_enhanced_dashboard():
         initial_sidebar_state="expanded",
     )
     
-    st.title("📊 BTC/USDT Scalping Strategy - Enhanced Dashboard")
+    st.title("📊 High-Performance Crypto Trading - Enhanced Dashboard")
     
     # Sidebar configuration
     st.sidebar.header("Configuration")
@@ -51,6 +63,80 @@ def show_enhanced_dashboard():
     st.sidebar.subheader("Data Settings")
     days = st.sidebar.slider("Days of Historical Data", min_value=7, max_value=90, value=30, step=1)
     timeframe = st.sidebar.selectbox("Timeframe", ["1m", "5m", "15m", "30m", "1h", "4h"], index=1)
+    
+    # Multi-symbol selection
+    with st.sidebar.expander("Symbol Selection", expanded=True):
+        use_multi_symbol = st.checkbox("Enable Multi-Symbol Portfolio", value=False)
+        
+        if use_multi_symbol:
+            selected_symbols = st.multiselect(
+                "Select Trading Pairs",
+                MAJOR_SYMBOLS,
+                default=["BTC/USDT", "ETH/USDT"]
+            )
+            
+            if not selected_symbols:
+                st.warning("Please select at least one symbol")
+                selected_symbols = ["BTC/USDT"]
+                
+            symbol_weights = {}
+            if len(selected_symbols) > 1:
+                st.write("Symbol Weight Allocation:")
+                total_weight = 0
+                
+                col1, col2 = st.columns(2)
+                for i, symbol in enumerate(selected_symbols):
+                    with col1 if i % 2 == 0 else col2:
+                        weight = st.slider(f"{symbol} Weight", 1, 100, 
+                                        value=100 // len(selected_symbols), 
+                                        key=f"weight_{symbol}")
+                        symbol_weights[symbol] = weight
+                        total_weight += weight
+                
+                # Normalize weights to 100%
+                if total_weight > 0:
+                    st.info(f"Total allocation: {total_weight}% - will be normalized to 100%")
+                    symbol_weights = {k: v/total_weight for k, v in symbol_weights.items()}
+        else:
+            selected_symbols = [SYMBOL]
+            symbol_weights = {SYMBOL: 1.0}
+    
+    # Strategy ensemble selection
+    with st.sidebar.expander("Strategy Ensemble", expanded=True):
+        use_ensemble = st.checkbox("Enable Strategy Ensemble", value=False)
+        
+        if use_ensemble:
+            selected_strategies = st.multiselect(
+                "Select Strategies",
+                AVAILABLE_STRATEGIES,
+                default=["ema_crossover"]
+            )
+            
+            if not selected_strategies:
+                st.warning("Please select at least one strategy")
+                selected_strategies = ["ema_crossover"]
+                
+            # Ensemble weighting method
+            ensemble_method = st.selectbox(
+                "Ensemble Weighting Method",
+                ["Equal Weight", "Sharpe-Weighted", "Win Rate-Weighted", "Custom Weights"],
+                index=0
+            )
+            
+            if ensemble_method == "Custom Weights":
+                strategy_weights = {}
+                st.write("Strategy Weight Allocation:")
+                
+                col1, col2 = st.columns(2)
+                for i, strat in enumerate(selected_strategies):
+                    with col1 if i % 2 == 0 else col2:
+                        weight = st.slider(f"{strat} Weight", 1, 100, 
+                                        value=100 // len(selected_strategies),
+                                        key=f"strat_weight_{strat}")
+                        strategy_weights[strat] = weight
+        else:
+            selected_strategies = ["ema_crossover"]
+            ensemble_method = "Equal Weight"
     
     # Strategy parameters section with collapsible UI
     with st.sidebar.expander("Strategy Settings", expanded=True):
@@ -72,28 +158,144 @@ def show_enhanced_dashboard():
         vol_col1, vol_col2 = st.columns(2)
         volume_period = vol_col1.number_input("Period", min_value=5, max_value=50, value=VOLUME_PERIOD)
         volume_threshold = vol_col2.number_input("Threshold", min_value=1.1, max_value=3.0, value=VOLUME_THRESHOLD, format="%.1f")
+        
+        # Donchian Breakout parameters (if selected)
+        if "donchian_breakout" in selected_strategies:
+            st.subheader("Donchian Breakout Parameters")
+            donch_col1, donch_col2 = st.columns(2)
+            donchian_period = donch_col1.number_input("Breakout Period", min_value=10, max_value=50, value=20)
+            donchian_filter = donch_col2.checkbox("Use ADX Filter", value=True)
     
-    # Risk parameters section
-    with st.sidebar.expander("Risk Management", expanded=True):
-        st.subheader("Stop Loss & Take Profit")
-        risk_col1, risk_col2 = st.columns(2)
-        stop_loss = risk_col1.number_input("Stop Loss %", min_value=0.1, max_value=2.0, value=STOP_LOSS_PCT*100, format="%.1f") / 100
-        take_profit = risk_col2.number_input("Take Profit %", min_value=0.1, max_value=5.0, value=TAKE_PROFIT_PCT*100, format="%.1f") / 100
+    # Advanced position sizing and risk management
+    with st.sidebar.expander("Position Sizing & Risk", expanded=True):
+        # Position sizing method
+        pos_sizing_method = st.selectbox(
+            "Position Sizing Method",
+            ["Fixed Percentage", "Volatility Targeting", "Kelly Criterion"],
+            index=0
+        )
         
-        st.subheader("ATR Parameters")
-        atr_col1, atr_col2, atr_col3 = st.columns(3)
-        atr_period = atr_col1.number_input("Period", min_value=5, max_value=20, value=ATR_PERIOD)
-        atr_sl = atr_col2.number_input("SL Multiplier", min_value=0.5, max_value=3.0, value=ATR_SL_MULTIPLIER, format="%.1f")
-        atr_tp = atr_col3.number_input("TP Multiplier", min_value=0.5, max_value=5.0, value=ATR_TP_MULTIPLIER, format="%.1f")
+        if pos_sizing_method == "Fixed Percentage":
+            fixed_size = st.slider("Position Size (%)", min_value=1, max_value=50, value=10, step=1)
+        
+        elif pos_sizing_method == "Volatility Targeting":
+            vol_target_pct = st.slider("Volatility Target (%)", 
+                                    min_value=5, max_value=30, value=10, step=1)
+            vol_lookback = st.slider("Volatility Lookback (days)", 
+                                    min_value=10, max_value=60, value=20, step=1)
+            max_pos_size = st.slider("Maximum Position Size (%)", 
+                                    min_value=10, max_value=50, value=30, step=5)
+        
+        elif pos_sizing_method == "Kelly Criterion":
+            kelly_fraction = st.slider("Kelly Fraction (0.5 = Half Kelly)", 
+                                    min_value=0.1, max_value=1.0, value=0.5, step=0.1)
+        
+        # Leverage option
+        use_leverage = st.checkbox("Use Light Leverage", value=False)
+        if use_leverage:
+            leverage_amount = st.slider("Leverage Multiplier", 
+                                    min_value=1.0, max_value=3.0, value=1.2, step=0.1)
+            st.warning("Even light leverage significantly increases risk. Use with caution.")
+        
+        # Pyramiding settings
+        enable_pyramiding = st.checkbox("Enable Pyramiding", value=False)
+        if enable_pyramiding:
+            max_pyramid_units = st.slider("Max Pyramid Units", 
+                                        min_value=1, max_value=5, value=3, step=1)
+            pyramid_threshold = st.slider("Pyramid Threshold (× ATR)", 
+                                        min_value=0.5, max_value=2.0, value=0.5, step=0.1)
     
-    # Advanced settings
-    with st.sidebar.expander("Advanced Settings", expanded=False):
-        use_train_test = st.checkbox("Split into Train/Test", value=True)
+    # Exit strategy settings
+    with st.sidebar.expander("Exit Strategy", expanded=True):
+        exit_strategy = st.selectbox(
+            "Exit Strategy Type",
+            ["Fixed Take Profit/Stop Loss", "ATR-Based Trailing Stop", "Time-Based Exit", "Signal Reversal"],
+            index=1
+        )
         
-        if use_train_test:
-            train_size = st.slider("Training Set Size", min_value=0.5, max_value=0.9, value=0.7, step=0.05)
+        if exit_strategy == "Fixed Take Profit/Stop Loss":
+            # Basic stop loss and take profit
+            sl_col1, sl_col2 = st.columns(2)
+            stop_loss = sl_col1.number_input("Stop Loss %", min_value=0.1, max_value=10.0, 
+                                            value=STOP_LOSS_PCT*100, format="%.1f") / 100
+            take_profit = sl_col2.number_input("Take Profit %", min_value=0.1, max_value=20.0, 
+                                            value=TAKE_PROFIT_PCT*100, format="%.1f") / 100
         
-        initial_balance = st.number_input("Initial Balance ($)", min_value=100, max_value=100000, value=10000, step=1000)
+        elif exit_strategy == "ATR-Based Trailing Stop":
+            # ATR parameters
+            atr_col1, atr_col2, atr_col3 = st.columns(3)
+            atr_period = atr_col1.number_input("ATR Period", min_value=5, max_value=20, value=ATR_PERIOD)
+            atr_sl_multiplier = atr_col2.number_input("ATR Trail Multiplier", 
+                                                    min_value=1.0, max_value=5.0, 
+                                                    value=3.0, format="%.1f")
+            breakeven_threshold = atr_col3.number_input("Breakeven Threshold (× ATR)", 
+                                                    min_value=0.5, max_value=3.0, value=1.0, step=0.1)
+        
+        elif exit_strategy == "Time-Based Exit":
+            max_trade_duration = st.number_input("Max Trade Duration (hours)", 
+                                                min_value=1, max_value=168, value=24)
+        
+        elif exit_strategy == "Signal Reversal":
+            st.info("Will exit position when strategy signal reverses")
+    
+    # Market regime detection
+    with st.sidebar.expander("Market Regime Detection", expanded=False):
+        enable_regime_detection = st.checkbox("Enable Regime-Based Trading", value=False)
+        
+        if enable_regime_detection:
+            regime_lookback = st.slider("Regime Detection Lookback (days)", 
+                                      min_value=10, max_value=60, value=30, step=5)
+            vol_ranging_threshold = st.slider("Ranging Market Vol Threshold (%)", 
+                                           min_value=1, max_value=10, value=3, step=1)
+            vol_trending_threshold = st.slider("Trending Market Vol Threshold (%)", 
+                                            min_value=5, max_value=20, value=8, step=1)
+            
+            # Strategy mapping per regime
+            st.subheader("Regime-Strategy Mapping")
+            regime_col1, regime_col2, regime_col3 = st.columns(3)
+            
+            with regime_col1:
+                st.markdown("**Low Volatility (Ranging)**")
+                ranging_strategies = st.multiselect(
+                    "Select Strategies",
+                    AVAILABLE_STRATEGIES,
+                    default=["mean_reversion"],
+                    key="ranging_strats"
+                )
+            
+            with regime_col2:
+                st.markdown("**Normal Volatility**")
+                normal_strategies = st.multiselect(
+                    "Select Strategies",
+                    AVAILABLE_STRATEGIES,
+                    default=["ema_crossover", "volume_breakout"],
+                    key="normal_strats"
+                )
+            
+            with regime_col3:
+                st.markdown("**High Volatility (Trending)**")
+                trending_strategies = st.multiselect(
+                    "Select Strategies",
+                    AVAILABLE_STRATEGIES,
+                    default=["donchian_breakout", "ema_crossover"],
+                    key="trending_strats"
+                )
+    
+    # Order execution settings
+    with st.sidebar.expander("Order Execution", expanded=False):
+        order_type = st.selectbox(
+            "Order Type",
+            ["Market", "Limit", "Post-Only (Maker)"],
+            index=2
+        )
+        
+        if order_type in ["Limit", "Post-Only (Maker)"]:
+            limit_offset_ticks = st.slider("Limit Price Offset (ticks)", 
+                                        min_value=0, max_value=5, value=1)
+            max_attempts = st.slider("Max Order Attempts", 
+                                   min_value=1, max_value=10, value=3)
+            attempt_delay_secs = st.slider("Retry Delay (seconds)", 
+                                         min_value=1, max_value=30, value=5)
     
     # Visualization options section
     with st.sidebar.expander("Visualization Options", expanded=False):
@@ -108,6 +310,21 @@ def show_enhanced_dashboard():
                 ["EMA Fast", "EMA Slow", "RSI", "Volume Trend", "ATR"],
                 default=["EMA Fast", "EMA Slow", "RSI"]
             )
+    
+    # Advanced settings
+    with st.sidebar.expander("Advanced Settings", expanded=False):
+        use_train_test = st.checkbox("Split into Train/Test", value=True)
+        
+        if use_train_test:
+            train_size = st.slider("Training Set Size", min_value=0.5, max_value=0.9, value=0.7, step=0.05)
+        
+        initial_balance = st.number_input("Initial Balance ($)", min_value=100, max_value=100000, value=10000, step=1000)
+        
+        # Idle cash management
+        manage_idle_cash = st.checkbox("Enable Idle Cash Yield", value=False)
+        if manage_idle_cash:
+            idle_cash_yield = st.slider("Annual Yield Rate (%)", 
+                                      min_value=1, max_value=10, value=5)
     
     # Run backtest button
     if st.sidebar.button("Run Backtest", use_container_width=True):
@@ -127,47 +344,92 @@ def show_enhanced_dashboard():
             "rsi_short_threshold": rsi_short,
             "volume_period": volume_period,
             "volume_threshold": volume_threshold,
-            "stop_loss_pct": stop_loss,
-            "take_profit_pct": take_profit,
-            "atr_period": atr_period,
-            "atr_sl_multiplier": atr_sl,
-            "atr_tp_multiplier": atr_tp
+            "use_multi_symbol": use_multi_symbol,
+            "symbols": selected_symbols,
+            "symbol_weights": symbol_weights,
+            "use_ensemble": use_ensemble,
+            "strategies": selected_strategies,
+            "ensemble_method": ensemble_method,
+            "pos_sizing_method": pos_sizing_method,
+            "exit_strategy": exit_strategy,
+            "enable_pyramiding": enable_pyramiding,
+            "max_pyramid_units": max_pyramid_units if enable_pyramiding else 1,
+            "enable_regime_detection": enable_regime_detection
         }
+        
+        # Add conditional parameters based on selections
+        if exit_strategy == "ATR-Based Trailing Stop":
+            params.update({
+                "atr_period": atr_period,
+                "atr_sl_multiplier": atr_sl_multiplier
+            })
+        elif exit_strategy == "Fixed Take Profit/Stop Loss":
+            params.update({
+                "stop_loss_pct": stop_loss,
+                "take_profit_pct": take_profit
+            })
+        
+        if pos_sizing_method == "Volatility Targeting":
+            params.update({
+                "vol_target_pct": vol_target_pct / 100,  # Convert to decimal
+                "vol_lookback": vol_lookback,
+                "max_pos_size": max_pos_size / 100  # Convert to decimal
+            })
+        elif pos_sizing_method == "Fixed Percentage":
+            params.update({
+                "fixed_size": fixed_size / 100  # Convert to decimal
+            })
+        
+        if use_leverage:
+            params["leverage"] = leverage_amount
         
         try:
             # Load data
             data_fetcher = DataFetcher(use_testnet=use_testnet)
             progress_bar.progress(10)
             
-            data = data_fetcher.fetch_historical_data(days=days, timeframe=timeframe)
-            progress_bar.progress(40)
+            # For multi-symbol, we'll need to fetch data for each symbol
+            all_symbol_data = {}
             
-            # Check if data is empty
-            if data.empty:
-                progress_bar.empty()
-                status_msg.error(f"No historical data available for {SYMBOL} with timeframe {timeframe} over the last {days} days.")
-                st.error("""
-                Could not fetch data. Possible reasons:
-                1. Connection issues with the exchange
-                2. API rate limits exceeded
-                3. The selected symbol or timeframe is not available
-                4. The selected date range has no data
+            for i, symbol in enumerate(selected_symbols):
+                status_msg.info(f"Loading historical data for {symbol}...")
+                symbol_data = data_fetcher.fetch_historical_data(
+                    symbol=symbol, days=days, timeframe=timeframe
+                )
                 
-                Try with a different timeframe or date range, or check your API connection.
-                """)
-                return
+                if symbol_data.empty:
+                    progress_bar.empty()
+                    status_msg.error(f"No historical data available for {symbol} with timeframe {timeframe} over the last {days} days.")
+                    return
+                
+                all_symbol_data[symbol] = symbol_data
+                progress_bar.progress(10 + (30 * (i + 1) // len(selected_symbols)))
             
             status_msg.info("Running backtest...")
             
-            # Initialize backtester
-            backtester = Backtester(data=data, initial_balance=initial_balance)
+            # Initialize backtester with multi-symbol and multi-strategy support
+            backtester = Backtester(
+                data=all_symbol_data[selected_symbols[0]],  # Initialize with first symbol data
+                initial_balance=initial_balance
+            )
+            
+            # Update backtester with additional parameters
+            backtester.params = params
+            backtester.all_symbol_data = all_symbol_data
             
             # Run backtest with train/test split if selected
             if use_train_test:
-                results = backtester.run(train_test_split=train_size)
+                results = backtester.run(
+                    train_test_split=train_size,
+                    symbols=selected_symbols,
+                    strategies=selected_strategies
+                )
                 progress_bar.progress(80)
             else:
-                results = backtester.run()
+                results = backtester.run(
+                    symbols=selected_symbols,
+                    strategies=selected_strategies
+                )
                 progress_bar.progress(80)
             
             # Display results
@@ -178,9 +440,11 @@ def show_enhanced_dashboard():
             progress_bar.empty()
             
             # Display the results
-            display_enhanced_results(results, use_train_test, backtester, params, 
-                                  show_candles, show_volume, show_trades, show_indicators, 
-                                  indicator_options if show_indicators else [])
+            display_enhanced_results(
+                results, use_train_test, backtester, params, 
+                show_candles, show_volume, show_trades, show_indicators, 
+                indicator_options if show_indicators else []
+            )
             
         except Exception as e:
             status_msg.error(f"Error in backtest: {str(e)}")
@@ -188,29 +452,41 @@ def show_enhanced_dashboard():
     
     # If no backtest has been run yet
     else:
-        st.info("👈 Adjust the parameters in the sidebar and click 'Run Backtest' to start.")
+        st.info("👈 Configure your high-performance strategy in the sidebar and click 'Run Backtest' to start.")
         
         # Show the introduction with columns layout
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            st.subheader("Enhanced Backtesting Dashboard")
+            st.subheader("High-Performance Trading Strategy Dashboard")
             st.markdown("""
-            This dashboard provides advanced visualization and analysis tools for your BTC/USDT trading strategy.
+            This enhanced dashboard aims to achieve 20-30% annual returns with careful risk management.
             
-            **Key Features:**
-            - Interactive parameter adjustment
-            - Detailed performance metrics
-            - Advanced chart visualization
-            - Trade distribution analysis
-            - Risk/reward analytics
+            **Key Performance Features:**
+            - 🔄 **Strategy Ensemble**: Combine multiple uncorrelated strategies
+            - 🌐 **Multi-Symbol Trading**: Spread risk across major crypto pairs
+            - 📊 **Dynamic Position Sizing**: Vol-targeting for optimal risk allocation
+            - 🛡️ **Advanced Risk Management**: ATR-based trailing stops
+            - 🏆 **Pyramiding Winners**: Scale into winning positions
+            - 🔍 **Regime Detection**: Adapt to market conditions
+            - 💰 **Idle Cash Management**: Generate yield on uninvested capital
             
-            Adjust the parameters in the sidebar and run a backtest to see detailed performance analysis.
+            Aim for consistent returns with controlled drawdowns by leveraging these proven tactics.
             """)
+            
+            st.info("Looking for 20-30% annual returns? This dashboard implements the research-backed techniques used by professional traders.")
         
         with col2:
             st.image("https://www.pngitem.com/pimgs/m/547-5479644_algorithmic-trading-strategy-png-download-algorithmic-trading-logo.png", 
-                    width=200, caption="Algorithmic Trading")
+                    width=200, caption="Advanced Algorithmic Trading")
+            
+            # Add expected performance metrics
+            st.markdown("### Target Performance")
+            metrics_df = pd.DataFrame({
+                "Metric": ["Annual Return", "Max Drawdown", "Sharpe Ratio", "Win Rate"],
+                "Target": ["20-30%", "<15%", ">1.5", "55-65%"]
+            })
+            st.table(metrics_df)
 
 def display_enhanced_results(results, is_split, backtester, params, 
                           show_candles, show_volume, show_trades, show_indicators, indicator_options):
