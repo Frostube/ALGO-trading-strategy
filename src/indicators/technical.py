@@ -1,5 +1,6 @@
 import pandas as pd
 import numpy as np
+import operator
 
 from src.config import (
     EMA_FAST, EMA_SLOW, RSI_PERIOD, VOLUME_PERIOD, VOLUME_THRESHOLD,
@@ -608,47 +609,119 @@ def identify_support_resistance(df, window=20):
     
     return df
 
-def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BETWEEN_TRADES):
+def _get_scalar_value(value):
     """
-    Generate trading signal based on the latest indicators.
+    Safely convert a pandas Series, scalar, or other value to a float.
+    Handles various edge cases that might occur with different sized dataframes.
     
     Args:
-        df: DataFrame with indicators applied
-        index: Index to get signal for (-1 for latest)
-        last_signal_time: Timestamp of the last signal (for trade frequency control)
-        min_bars_between: Minimum number of bars between trades
+        value: The value to convert (could be Series, scalar, or other)
         
     Returns:
-        dict with signal information
+        float: A scalar float value
     """
-    # Get the row for the specified index
-    if isinstance(index, int):
-        row = df.iloc[index]
-    else:
-        row = df.loc[index]
+    if value is None:
+        return 0.0
     
+    # If it's already a scalar numeric value, return it
+    if isinstance(value, (int, float)):
+        return float(value)
+    
+    # Handle pandas Series
+    if hasattr(value, 'iloc'):
+        if len(value) == 0:
+            return 0.0
+        try:
+            return float(value.iloc[0])
+        except (IndexError, ValueError, TypeError):
+            try:
+                return float(value.values[0])
+            except (IndexError, ValueError, TypeError):
+                return 0.0
+    
+    # Handle numpy arrays
+    if hasattr(value, 'shape'):
+        try:
+            return float(value[0])
+        except (IndexError, ValueError, TypeError):
+            return 0.0
+    
+    # Try direct conversion for other types
+    try:
+        return float(value)
+    except (ValueError, TypeError):
+        return 0.0
+
+def _safe_compare(value, threshold, comparison_func):
+    """
+    Safely compare a value with a threshold using the provided comparison function.
+    
+    Args:
+        value: The value to compare (could be Series, scalar, etc.)
+        threshold: The threshold to compare against
+        comparison_func: Function to use for comparison (e.g., operator.gt)
+        
+    Returns:
+        bool: Result of the comparison
+    """
+    return comparison_func(_get_scalar_value(value), threshold)
+
+def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BETWEEN_TRADES):
+    """
+    Generate trading signals based on calculated indicators.
+    
+    Args:
+        df: DataFrame with indicator data
+        index: Index to get signal for, defaults to latest (-1)
+        last_signal_time: Timestamp of last signal (for trade frequency limiting)
+        min_bars_between: Minimum bars between trades
+        
+    Returns:
+        dict: Signal information
+    """
+    from src.config import (
+        USE_ADAPTIVE_THRESHOLDS, USE_ML_FILTER, ML_PROBABILITY_THRESHOLD,
+        USE_TIME_FILTERS, TRADING_HOURS_START, TRADING_HOURS_END,
+        AVOID_MIDNIGHT_HOURS, HIGH_VOLATILITY_HOURS, WEEKEND_TRADING
+    )
+
+    # Get the row at the specified index
+    if isinstance(index, int):
+        if index < 0:
+            # For negative indices, count from the end
+            row = df.iloc[index]
+            timestamp = df.index[index]
+        else:
+            # For positive indices, use iloc
+            row = df.iloc[index]
+            timestamp = df.index[index]
+    else:
+        # If index is a timestamp or similar, use loc
+        row = df.loc[index]
+        timestamp = index
+
     # Initialize signal
     signal = {
-        'timestamp': row.name,
-        'close': row['close'],
-        'ema_trend': row['ema_trend'],
-        'hma_trend': row.get('hma_trend', 0),
-        'donchian_breakout': row.get('donchian_breakout', 0),
-        'market_trend': row.get('market_trend', 0),
-        'micro_trend': row.get('ema_micro_direction', 0),
-        'rsi': row['rsi'],
+        'timestamp': timestamp,
+        'close': _get_scalar_value(row['close']),
+        'ema_trend': _get_scalar_value(row['ema_trend']),
+        'hma_trend': _get_scalar_value(row.get('hma_trend', 0)),
+        'donchian_breakout': _get_scalar_value(row.get('donchian_breakout', 0)),
+        'market_trend': _get_scalar_value(row.get('market_trend', 0)),
+        'micro_trend': _get_scalar_value(row.get('ema_micro_direction', 0)),
+        'rsi': _get_scalar_value(row['rsi']),
         'volume_spike': row['volume_spike'] if not USE_ADAPTIVE_THRESHOLDS else row['adaptive_volume_spike'],
-        'atr': row.get('atr', None),
-        'atr_pct': row.get('atr_pct', None),
+        'atr': _get_scalar_value(row.get('atr', None)),
+        'atr_pct': _get_scalar_value(row.get('atr_pct', None)),
         'momentum_up': row.get('momentum_up', False),
         'momentum_down': row.get('momentum_down', False),
         'strong_momentum_up': row.get('strong_momentum_up', False),
         'strong_momentum_down': row.get('strong_momentum_down', False),
         'bullish_candle': row.get('bullish_candle', False),
         'bearish_candle': row.get('bearish_candle', False),
-        'upper_band': row.get('upper_band', row['close'] * 1.01),
-        'lower_band': row.get('lower_band', row['close'] * 0.99),
-        'channel_width': row.get('channel_width', 2.0),
+        'upper_band': _get_scalar_value(row.get('upper_band', row['close'] * 1.01)),
+        'lower_band': _get_scalar_value(row.get('lower_band', row['close'] * 0.99)),
+        'channel_width': _get_scalar_value(row.get('channel_width', 2.0)),
         'bullish_engulfing': row.get('bullish_engulfing', False),
         'bearish_engulfing': row.get('bearish_engulfing', False),
         'hammer': row.get('hammer', False),
@@ -659,7 +732,7 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
         'at_support': row.get('at_support', False),
         'at_resistance': row.get('at_resistance', False),
         'high_volatility': row.get('high_volatility', False),
-        'trend_strength': row.get('trend_strength', 0.0),
+        'trend_strength': _get_scalar_value(row.get('trend_strength', 0.0)),
         'signal': 'neutral'
     }
     
@@ -670,10 +743,10 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
     )
     
     # Apply time-of-day filters if configured - MAKING THIS LESS RESTRICTIVE
-    if USE_TIME_FILTERS and hasattr(row.name, 'hour'):
+    if USE_TIME_FILTERS and hasattr(timestamp, 'hour'):
         # Get hour in UTC
-        current_hour = row.name.hour
-        current_weekday = row.name.weekday()  # 0=Monday, 6=Sunday
+        current_hour = timestamp.hour
+        current_weekday = timestamp.weekday()  # 0=Monday, 6=Sunday
         
         # Check if current time is outside trading hours - DISABLED FOR NOW
         # if current_hour < TRADING_HOURS_START or current_hour >= TRADING_HOURS_END:
@@ -700,7 +773,7 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
     if last_signal_time is not None:
         try:
             # Find how many bars since last signal
-            idx = df.index.get_loc(row.name)
+            idx = df.index.get_loc(timestamp)
             last_idx = df.index.get_loc(last_signal_time)
             bars_since = idx - last_idx
             bars_since_allowed = bars_since >= min_bars_between
@@ -726,9 +799,10 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
     # MODIFIED TO BE LESS RESTRICTIVE - Not requiring all conditions simultaneously
     # Long signal when most conditions align
     if (bars_since_allowed and
-        row.get('hma_trend', 0) > 0 and  # Hull MA trending up
-        (row.get('donchian_breakout', 0) > 0 or row.get('close', 0) > row.get('upper_band', float('inf')) * 0.998) and  # Near upper band
-        row['rsi'] < rsi_oversold + 15 and  # Relaxed RSI threshold 
+        _safe_compare(row.get('hma_trend', 0), 0, operator.gt) and  # Hull MA trending up
+        (_safe_compare(row.get('donchian_breakout', 0), 0, operator.gt) or  # Breakout upward
+         _safe_compare(row['close'], _get_scalar_value(row.get('upper_band', row['close'] * 1.01)) * 0.998, operator.gt)) and  # Near upper band
+        _safe_compare(row['rsi'], rsi_oversold + 15, operator.lt) and  # Relaxed RSI threshold 
         # Price action confirmation - NOW ONLY REQUIRING ONE OF THESE:
         (signal['bullish_engulfing'] or signal['hammer'] or signal['morning_star'] or
          signal['doji'] or signal['at_support'] or signal['bullish_candle'])):
@@ -737,9 +811,10 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
     
     # Short signal when most conditions align - LESS RESTRICTIVE
     elif (bars_since_allowed and
-          row.get('hma_trend', 0) < 0 and  # Hull MA trending down
-          (row.get('donchian_breakout', 0) < 0 or row.get('close', 0) < row.get('lower_band', 0) * 1.002) and  # Near lower band
-          row['rsi'] > rsi_overbought - 15 and  # Relaxed RSI threshold
+          _safe_compare(row.get('hma_trend', 0), 0, operator.lt) and  # Hull MA trending down
+          (_safe_compare(row.get('donchian_breakout', 0), 0, operator.lt) or  # Breakout downward
+           _safe_compare(row['close'], _get_scalar_value(row.get('lower_band', row['close'] * 0.99)) * 1.002, operator.lt)) and  # Near lower band
+          _safe_compare(row['rsi'], rsi_overbought - 15, operator.gt) and  # Relaxed RSI threshold
           # Price action confirmation - NOW ONLY REQUIRING ONE OF THESE:
           (signal['bearish_engulfing'] or signal['shooting_star'] or signal['evening_star'] or
            signal['doji'] or signal['at_resistance'] or signal['bearish_candle'])):
@@ -749,18 +824,22 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
     # STRATEGY 2: Multi-MA Trend Strategy (Strong trends) - MUCH LESS RESTRICTIVE
     # Long signal with fewer conditions required
     elif (bars_since_allowed and
-          ((row['market_trend'] > 0 and row['ema_trend'] > 0) or  # Either overall trend conditions
-           (row.get('hma_trend', 0) > 0 and row['ema_micro_direction'] > 0)) and  # Or short-term trend conditions
-          row['rsi'] < rsi_overbought and  # Just not extremely overbought
+          ((_safe_compare(row['market_trend'], 0, operator.gt) and 
+            _safe_compare(row['ema_trend'], 0, operator.gt)) or  # Either overall trend conditions
+           (_safe_compare(row.get('hma_trend', 0), 0, operator.gt) and 
+            _safe_compare(row['ema_micro_direction'], 0, operator.gt))) and  # Or short-term trend conditions
+          _safe_compare(row['rsi'], rsi_overbought, operator.lt) and  # Just not extremely overbought
           (signal['bullish_candle'] or signal['bullish_engulfing'] or signal['hammer'] or signal['at_support'])):  # Any bullish pattern
         signal['signal'] = 'buy'
         signal['strategy'] = 'multi_ma_trend'
     
     # Short signal with fewer conditions required
     elif (bars_since_allowed and
-          ((row['market_trend'] < 0 and row['ema_trend'] < 0) or  # Either overall trend conditions
-           (row.get('hma_trend', 0) < 0 and row['ema_micro_direction'] < 0)) and  # Or short-term trend conditions 
-          row['rsi'] > rsi_oversold and  # Just not extremely oversold
+          ((_safe_compare(row['market_trend'], 0, operator.lt) and 
+            _safe_compare(row['ema_trend'], 0, operator.lt)) or  # Either overall trend conditions
+           (_safe_compare(row.get('hma_trend', 0), 0, operator.lt) and 
+            _safe_compare(row['ema_micro_direction'], 0, operator.lt))) and  # Or short-term trend conditions 
+          _safe_compare(row['rsi'], rsi_oversold, operator.gt) and  # Just not extremely oversold
           (signal['bearish_candle'] or signal['bearish_engulfing'] or signal['shooting_star'] or signal['at_resistance'])):  # Any bearish pattern
         signal['signal'] = 'sell'
         signal['strategy'] = 'multi_ma_trend'
@@ -768,14 +847,14 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
     # STRATEGY 3: Mean-reversion for RSI extremes - LESS RESTRICTIVE
     # Mean reversion buy with fewer conditions
     elif (bars_since_allowed and
-          row['rsi'] < 30 and  # Oversold
+          _safe_compare(row['rsi'], 30, operator.lt) and  # Oversold
           row.get('bullish_candle', False)):  # Just need a bullish candle
         signal['signal'] = 'buy'
         signal['strategy'] = 'mean_reversion'
     
     # Mean reversion sell with fewer conditions
     elif (bars_since_allowed and
-          row['rsi'] > 70 and  # Overbought
+          _safe_compare(row['rsi'], 70, operator.gt) and  # Overbought
           row.get('bearish_candle', False)):  # Just need a bearish candle
         signal['signal'] = 'sell'
         signal['strategy'] = 'mean_reversion'
