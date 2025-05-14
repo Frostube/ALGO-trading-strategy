@@ -12,9 +12,11 @@ from datetime import datetime, timedelta
 from collections import deque
 from pathlib import Path
 import numpy as np
+import time
 
 from src.utils.logger import logger
 from src.utils.notification import send_notification
+from src.utils.metrics import profit_factor
 
 class HealthMonitor:
     """
@@ -175,15 +177,15 @@ class HealthMonitor:
         win_rate = sum(self.trades) / len(self.trades)
         
         # Calculate profit factor
-        profit_factor = self.total_profit / max(self.total_loss, 0.0001)
+        profit_factor_val = self.get_profit_factor()
         
         # Check against thresholds
-        is_healthy = (profit_factor >= self.min_profit_factor and 
+        is_healthy = (profit_factor_val >= self.min_profit_factor and 
                      win_rate >= self.min_win_rate)
         
         # Log current health status
         logger.info(f"Strategy health check: "
-                   f"PF={profit_factor:.2f} (min {self.min_profit_factor}), "
+                   f"PF={profit_factor_val:.2f} (min {self.min_profit_factor}), "
                    f"Win={win_rate*100:.1f}% (min {self.min_win_rate*100:.1f}%), "
                    f"Status: {'HEALTHY' if is_healthy else 'DEGRADED'}")
         
@@ -252,9 +254,46 @@ class HealthMonitor:
     
     def get_profit_factor(self):
         """Get the current profit factor."""
-        if self.total_loss == 0:
-            return float('inf') if self.total_profit > 0 else 0
-        return self.total_profit / self.total_loss
+        # Extract winners and losers from trades
+        winners = []
+        losers = []
+        
+        for trade in self.trades:
+            if isinstance(trade, dict) and 'pnl' in trade:
+                if trade['pnl'] > 0:
+                    winners.append(trade['pnl'])
+                else:
+                    losers.append(trade['pnl'])
+        
+        # Use the utility function with MIN_LOSS floor
+        return profit_factor(winners, losers)
+    
+    def get_profit_factor_last_n(self, n=40):
+        """
+        Get the profit factor for the last N trades.
+        
+        Args:
+            n (int): Number of most recent trades to consider
+        
+        Returns:
+            float: Profit factor for the last N trades
+        """
+        # If we have fewer trades than requested, use all available
+        last_n_trades = list(self.trades)[-n:] if len(self.trades) >= n else list(self.trades)
+        
+        # Extract winners and losers from these trades
+        winners = []
+        losers = []
+        
+        for trade in last_n_trades:
+            if isinstance(trade, dict) and 'pnl' in trade:
+                if trade['pnl'] > 0:
+                    winners.append(trade['pnl'])
+                else:
+                    losers.append(trade['pnl'])
+        
+        # Use the utility function with MIN_LOSS floor
+        return profit_factor(winners, losers)
     
     def reset(self):
         """Reset the health monitor."""
@@ -268,6 +307,53 @@ class HealthMonitor:
         self._save_status()
         logger.info(f"Health monitor reset for {self.strategy_name} on {self.symbol}")
 
+    def is_trading_allowed(self, strategy=None, symbol=None):
+        """
+        Check if trading is allowed based on health metrics.
+        
+        Args:
+            strategy: Optional strategy name to check
+            symbol: Optional symbol to check
+            
+        Returns:
+            bool: True if trading is allowed, False otherwise
+        """
+        # Skip health check if not enough trades
+        if len(self.trades) < self.window_size:
+            return True
+            
+        # Calculate metrics
+        winners = [trade['pnl'] for trade in self.trades if trade['pnl'] > 0]
+        losers = [trade['pnl'] for trade in self.trades if trade['pnl'] <= 0]
+        
+        # Use the new utility function with floor value
+        profit_factor_val = profit_factor(winners, losers)
+        
+        win_rate = self.get_win_rate()
+        
+        # Check if metrics are above thresholds
+        is_healthy = (profit_factor_val >= self.min_profit_factor and
+                     win_rate >= self.min_win_rate)
+                     
+        if not is_healthy:
+            logger.warning(
+                f"Health check failed for {strategy or 'strategy'} on {symbol or 'symbol'}: "
+                f"PF={profit_factor_val:.2f} (min {self.min_profit_factor}), "
+                f"Win={win_rate*100:.1f}% (min {self.min_win_rate*100:.1f}%)"
+            )
+            
+            # Notify if trading paused
+            if not self.is_trading_paused:
+                self.is_trading_paused = True
+                self.pause_until = datetime.now() + timedelta(hours=24)
+                
+                logger.warning(
+                    f"TRADING PAUSED for {strategy or 'strategy'} on {symbol or 'symbol'} "
+                    f"due to degraded performance (PF={profit_factor_val:.2f}, "
+                    f"Win={win_rate*100:.1f}%)"
+                )
+                
+        return is_healthy
 
 def send_notification(message):
     """

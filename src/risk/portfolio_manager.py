@@ -13,6 +13,13 @@ import json
 
 from src.utils.logger import logger
 
+# Edge-weighted position sizing configuration
+# Strategies with profit factor >= pf_hi will use risk_hi, others use risk_lo
+EDGE_WEIGHTS = {
+    "ema_crossover": {"pf_hi": 1.2, "risk_hi": 0.010, "risk_lo": 0.005},
+    "rsi_oscillator": {"pf_hi": 1.2, "risk_hi": 0.012, "risk_lo": 0.007},
+}
+
 class PortfolioRiskManager:
     """
     Manages risk allocation across a multi-asset portfolio.
@@ -21,6 +28,7 @@ class PortfolioRiskManager:
     - Volatility-targeted position sizing
     - Global risk cap across all positions
     - Adaptive sizing based on market regime
+    - Edge-weighted position sizing based on recent performance
     """
     
     def __init__(self, account_equity, max_portfolio_risk=0.015, risk_per_trade=0.0075,
@@ -56,22 +64,50 @@ class PortfolioRiskManager:
         """Update the account equity value."""
         self.account_equity = new_equity
     
-    def calculate_position_size(self, symbol, current_price, atr_value, side='long'):
+    def dynamic_risk_pct(self, strat_name, pf_recent):
         """
-        Calculate the position size for a new trade based on volatility-targeted risk.
+        Calculate dynamic risk percentage based on strategy's recent performance.
+        
+        Args:
+            strat_name: Strategy name ('ema_crossover', 'rsi_oscillator', etc.)
+            pf_recent: Recent profit factor from health monitor
+            
+        Returns:
+            float: Risk percentage to use for position sizing
+        """
+        cfg = EDGE_WEIGHTS.get(strat_name, None)
+        if cfg is None:
+            return self.risk_per_trade  # Default if strategy not in config
+        
+        # Use higher risk for strategies with good recent performance
+        return cfg["risk_hi"] if pf_recent >= cfg["pf_hi"] else cfg["risk_lo"]
+    
+    def calculate_position_size(self, symbol, current_price, atr_value, strat_name=None, pf_recent=None, side='long'):
+        """
+        Calculate the position size for a new trade based on volatility-targeted risk
+        and dynamic edge-based position sizing.
         
         Args:
             symbol: Trading pair symbol
             current_price: Current market price
             atr_value: ATR value in price units
+            strat_name: Strategy name for edge-weighted sizing
+            pf_recent: Recent profit factor for the strategy
             side: Trade direction ('long' or 'short')
             
         Returns:
             tuple: (quantity, notional_value, can_open) - position quantity, 
                    notional value, and whether the position can be opened
         """
+        # Calculate risk percentage - use dynamic risk if strategy info provided
+        if strat_name and pf_recent is not None:
+            risk_pct = self.dynamic_risk_pct(strat_name, pf_recent)
+            logger.info(f"Using dynamic risk for {strat_name}: {risk_pct*100:.3f}% (PF={pf_recent:.2f})")
+        else:
+            risk_pct = self.risk_per_trade
+        
         # Calculate risk in dollar terms
-        dollar_risk = self.account_equity * self.risk_per_trade
+        dollar_risk = self.account_equity * risk_pct
         
         # Calculate price volatility
         atr_pct = atr_value / current_price
@@ -108,7 +144,7 @@ class PortfolioRiskManager:
         # Log position sizing details
         logger.info(f"Position size for {symbol} ({side}): {position_size} coins, "
                    f"${notional_value:.2f} notional, ${new_risk:.2f} risk, "
-                   f"vol regime: {regime}, can open: {can_open}")
+                   f"vol regime: {regime}, risk%: {risk_pct*100:.2f}, can open: {can_open}")
         
         return position_size, notional_value, can_open
     

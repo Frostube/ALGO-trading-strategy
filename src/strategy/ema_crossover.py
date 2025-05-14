@@ -17,12 +17,14 @@ import json
 from src.config import (
     SYMBOL, STOP_LOSS_PCT, TAKE_PROFIT_PCT, RISK_PER_TRADE,
     USE_ATR_STOPS, ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER,
-    VOL_TARGET_PCT, MAX_POSITION_PCT, TRAIL_ACTIVATION_PCT
+    VOL_TARGET_PCT, MAX_POSITION_PCT, TRAIL_ACTIVATION_PCT,
+    VOL_RATIO_MIN, RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT
 )
 from src.utils.logger import logger, log_trade
 from src.strategy.ema_optimizer import find_best_ema_pair, fetch_historical_data
 from src.db.models import Trade
 from src.strategy.base_strategy import BaseStrategy
+from src.utils.metrics import profit_factor
 
 class EMACrossoverStrategy(BaseStrategy):
     """
@@ -31,9 +33,10 @@ class EMACrossoverStrategy(BaseStrategy):
     
     def __init__(self, symbol=SYMBOL, timeframe='4h', db_session=None, account_balance=1000.0, 
                 history_days=365, auto_optimize=False, config=None,
-                fast_ema=8, slow_ema=21, trend_ema=50, atr_sl_multiplier=1.0,
+                fast_ema=5, slow_ema=13, trend_ema=50, atr_sl_multiplier=1.0,
                 risk_per_trade=0.0075, use_volatility_sizing=True, vol_target_pct=0.0075,
-                enable_pyramiding=True, max_pyramid_entries=2, health_monitor=None):
+                enable_pyramiding=False, max_pyramid_entries=2, health_monitor=None,
+                atr_trail_multiplier=1.25):
         # Initialize the base class first
         super().__init__(config)
         
@@ -47,6 +50,7 @@ class EMACrossoverStrategy(BaseStrategy):
         self.last_signal_time = None
         self.history_days = history_days
         self.health_monitor = health_monitor
+        self.min_bars_between_trades = 2  # Default 2 bars between trades
         
         # Get EMA parameters - either from config or explicitly provided
         if config:
@@ -55,7 +59,7 @@ class EMACrossoverStrategy(BaseStrategy):
             self.trend_ema = config.get('ema_trend', trend_ema)
             self.atr_sl_multiplier = config.get('atr_sl_multiplier', atr_sl_multiplier)
             self.atr_tp_multiplier = config.get('atr_tp_multiplier', None)
-            self.atr_trail_multiplier = config.get('atr_trail_multiplier', atr_sl_multiplier)
+            self.atr_trail_multiplier = config.get('atr_trail_multiplier', atr_trail_multiplier)
             self.risk_per_trade = config.get('risk_per_trade', risk_per_trade)
             self.use_volatility_sizing = config.get('use_volatility_sizing', use_volatility_sizing)
             self.vol_target_pct = config.get('vol_target_pct', vol_target_pct)
@@ -66,13 +70,21 @@ class EMACrossoverStrategy(BaseStrategy):
             
             # RSI filter parameters
             self.use_rsi_filter = config.get('use_rsi_filter', True)
-            self.rsi_period = config.get('rsi_period', 14)
-            self.rsi_oversold = config.get('rsi_oversold', 30)
-            self.rsi_overbought = config.get('rsi_overbought', 70)
+            self.rsi_period = config.get('rsi_period', RSI_PERIOD)
+            self.rsi_oversold = config.get('rsi_oversold', RSI_OVERSOLD)
+            self.rsi_overbought = config.get('rsi_overbought', RSI_OVERBOUGHT)
             
             # Volume filter parameters
             self.use_volume_filter = config.get('use_volume_filter', True)
-            self.volume_threshold = config.get('volume_threshold', 1.5)
+            self.volume_threshold = config.get('volume_threshold', VOL_RATIO_MIN)
+            
+            # Dynamic trend filter parameters
+            self.use_dynamic_trend_filter = config.get('use_dynamic_trend_filter', True)
+            self.atr_low_threshold = config.get('atr_low_threshold', 0.015)  # 1.5% of price
+            
+            # IMPROVEMENT 4: Outlier volatility filter
+            self.use_volatility_filter = config.get('use_volatility_filter', True)
+            self.volatility_threshold_factor = config.get('volatility_threshold_factor', 0.75)
         else:
             # Use explicitly provided parameters
             self.fast_ema = fast_ema
@@ -80,7 +92,7 @@ class EMACrossoverStrategy(BaseStrategy):
             self.trend_ema = trend_ema
             self.atr_sl_multiplier = atr_sl_multiplier
             self.atr_tp_multiplier = None  # Removed fixed TP
-            self.atr_trail_multiplier = atr_sl_multiplier  # Default trail = SL
+            self.atr_trail_multiplier = atr_trail_multiplier  # IMPROVEMENT 1: Wider trail (1.25x default)
             self.risk_per_trade = risk_per_trade
             self.use_volatility_sizing = use_volatility_sizing
             self.vol_target_pct = vol_target_pct
@@ -91,13 +103,21 @@ class EMACrossoverStrategy(BaseStrategy):
             
             # RSI filter parameters
             self.use_rsi_filter = True
-            self.rsi_period = 14
-            self.rsi_oversold = 30
-            self.rsi_overbought = 70
+            self.rsi_period = RSI_PERIOD
+            self.rsi_oversold = RSI_OVERSOLD
+            self.rsi_overbought = RSI_OVERBOUGHT
             
             # Volume filter parameters
             self.use_volume_filter = True
-            self.volume_threshold = 1.5
+            self.volume_threshold = VOL_RATIO_MIN
+            
+            # Dynamic trend filter parameters
+            self.use_dynamic_trend_filter = True
+            self.atr_low_threshold = 0.015  # 1.5% of price
+            
+            # IMPROVEMENT 4: Outlier volatility filter
+            self.use_volatility_filter = True
+            self.volatility_threshold_factor = 0.75  # Filter if volatility < 75% of 30-day average
         
         # Automatically find optimal EMA pair if requested
         if auto_optimize:
@@ -168,7 +188,7 @@ class EMACrossoverStrategy(BaseStrategy):
     
     def apply_indicators(self, df):
         """
-        Apply EMA indicators to the dataframe.
+        Apply all indicators needed for strategy execution.
         
         Args:
             df: DataFrame with OHLCV data
@@ -176,80 +196,64 @@ class EMACrossoverStrategy(BaseStrategy):
         Returns:
             DataFrame with indicators added
         """
-        # Make a copy to avoid modifying the original
-        df = df.copy()
+        # Calculate EMAs
+        df['ema_fast'] = df['close'].ewm(span=self.fast_ema).mean()
+        df['ema_slow'] = df['close'].ewm(span=self.slow_ema).mean()
+        df['ema_trend'] = df['close'].ewm(span=self.trend_ema).mean()
         
-        # Check if dataframe is empty or has sufficient data
-        if df.empty:
-            logger.warning("Cannot apply indicators to empty dataframe")
-            return df
+        # Add crossover signals
+        df['ema_crossover'] = 0
+        # When fast EMA crosses above slow EMA, set to 1
+        df.loc[(df['ema_fast'] > df['ema_slow']) & (df['ema_fast'].shift(1) <= df['ema_slow'].shift(1)), 'ema_crossover'] = 1
+        # When fast EMA crosses below slow EMA, set to -1
+        df.loc[(df['ema_fast'] < df['ema_slow']) & (df['ema_fast'].shift(1) >= df['ema_slow'].shift(1)), 'ema_crossover'] = -1
         
-        try:
-            # Calculate EMAs
-            df[f'ema_{self.fast_ema}'] = df['close'].ewm(span=self.fast_ema, adjust=False).mean()
-            df[f'ema_{self.slow_ema}'] = df['close'].ewm(span=self.slow_ema, adjust=False).mean()
-            df[f'ema_{self.trend_ema}'] = df['close'].ewm(span=self.trend_ema, adjust=False).mean()  # Added trend EMA
-            
-            # Calculate EMA direction (1 for bullish, -1 for bearish, 0 for neutral)
-            df['ema_trend'] = 0
-            df.loc[df[f'ema_{self.fast_ema}'] > df[f'ema_{self.slow_ema}'], 'ema_trend'] = 1
-            df.loc[df[f'ema_{self.fast_ema}'] < df[f'ema_{self.slow_ema}'], 'ema_trend'] = -1
-            
-            # Calculate crossover points (1 for bullish crossover, -1 for bearish crossover)
-            df['ema_crossover'] = df['ema_trend'].diff().fillna(0)
-            
-            # Calculate long-term trend direction
-            df['long_term_trend'] = 0
-            df.loc[df['close'] > df[f'ema_{self.trend_ema}'], 'long_term_trend'] = 1
-            df.loc[df['close'] < df[f'ema_{self.trend_ema}'], 'long_term_trend'] = -1
-            
-            # Add RSI for confirmation
-            df = self._calculate_rsi(df, period=self.rsi_period)
-            
-            # Add ATR for volatility-based stops
-            df = self._calculate_atr(df, period=14)
-            
-            # Add volume indicators
-            df = self._calculate_volume_indicators(df)
-            
-        except Exception as e:
-            logger.error(f"Error applying indicators: {str(e)}")
-            # If we encounter an error, return the original dataframe with minimal required columns
-            if 'ema_trend' not in df.columns:
-                df['ema_trend'] = 0  # Neutral
-            if 'long_term_trend' not in df.columns:
-                df['long_term_trend'] = 0  # Neutral
-            if 'rsi' not in df.columns:
-                df['rsi'] = 50  # Neutral
-            if 'volume_spike' not in df.columns:
-                df['volume_spike'] = False  # No spike
-            
+        # Calculate ATR for volatility sizing and dynamic trend filtering
+        high_low = df['high'] - df['low']
+        high_close = abs(df['high'] - df['close'].shift(1))
+        low_close = abs(df['low'] - df['close'].shift(1))
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = ranges.max(axis=1)
+        df['atr'] = true_range.rolling(window=14).mean()
+        
+        # Calculate ATR as percentage of price for dynamic trend filtering
+        df['atr_pct'] = df['atr'] / df['close']
+        
+        # Calculate RSI
+        df = self._calculate_rsi(df, period=self.rsi_period)
+        
+        # Calculate volume indicators
+        df['volume_ma'] = df['volume'].rolling(window=20).mean()
+        df['volume_ratio'] = df['volume'] / df['volume_ma']
+        df['volume_spike'] = df['volume_ratio'] > 2.0  # True when volume is >2x the average
+        
+        # Save the latest ATR value for position sizing
+        if len(df) > 0:
+            self.last_atr_value = df['atr'].iloc[-1]
+        
         return df
     
     def _calculate_rsi(self, df, period=14):
         """Calculate RSI indicator"""
+        # Make a copy to avoid modifying the original
+        df = df.copy()
+        
         # Calculate price changes
-        df['price_change'] = df['close'].diff()
+        delta = df['close'].diff()
         
-        # Calculate gains and losses
-        df['gain'] = df['price_change'].apply(lambda x: x if x > 0 else 0)
-        df['loss'] = df['price_change'].apply(lambda x: abs(x) if x < 0 else 0)
+        # Get gains and losses
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
         
-        # Calculate average gains and losses
-        df['avg_gain'] = df['gain'].rolling(window=period).mean()
-        df['avg_loss'] = df['loss'].rolling(window=period).mean()
-        
-        # Handle division by zero
-        df['avg_loss'] = df['avg_loss'].replace(0, 0.001)
+        # Calculate average gains and losses with exponential moving average
+        avg_gain = gain.ewm(com=period-1, min_periods=period).mean()
+        avg_loss = loss.ewm(com=period-1, min_periods=period).mean()
         
         # Calculate relative strength
-        df['rs'] = df['avg_gain'] / df['avg_loss']
+        rs = avg_gain / avg_loss.replace(0, 1e-10)  # Avoid division by zero
         
         # Calculate RSI
-        df['rsi'] = 100 - (100 / (1 + df['rs']))
-        
-        # Clean up temporary columns
-        df = df.drop(['price_change', 'gain', 'loss', 'avg_gain', 'avg_loss', 'rs'], axis=1)
+        df['rsi'] = 100 - (100 / (1 + rs))
         
         return df
     
@@ -308,51 +312,99 @@ class EMACrossoverStrategy(BaseStrategy):
         
         # Initialize signal
         signal_type = ""
+        signal_reasons = []
+        
+        # Avoid trading with insufficient data (need at least 50 bars for reliable indicators)
+        if len(df) < 50:
+            return ""
         
         # EMA crossover signals without trend filter
-        if 'ema_crossover' in row and row['ema_crossover'] != 0:
-            # Long signal: Fast EMA crossed above slow EMA
-            if row['ema_crossover'] > 0:
+        if 'ema_crossover' in df.columns:
+            crossover_value = row['ema_crossover']
+            
+            # Check for buy signal - bullish crossover (fast EMA crosses above slow EMA)
+            if crossover_value == 1:
                 signal_type = "buy"
-            # Short signal: Fast EMA crossed below slow EMA
-            elif row['ema_crossover'] < 0:
+                signal_reasons.append(f"EMA Crossover: Fast({self.fast_ema}) > Slow({self.slow_ema})")
+                
+                # 200-EMA trend filter disabled
+                # Keeping original volatility check logic intact
+                if self.use_dynamic_trend_filter:
+                    atr_pct = row['atr_pct']
+                    if atr_pct > self.atr_low_threshold:
+                        # In higher volatility - 200 EMA filter disabled
+                        signal_reasons.append(f"200-EMA filter disabled for more signals")
+                    else:
+                        # In low volatility, ignore trend filter
+                        signal_reasons.append(f"ATR({atr_pct:.4f}) < {self.atr_low_threshold:.4f} - Low volatility, trend filter bypassed")
+                
+                # Apply additional filters if enabled
+                if signal_type and self.use_rsi_filter:
+                    rsi_value = row['rsi']
+                    if rsi_value < self.rsi_overbought:  # Check RSI is not overbought
+                        signal_reasons.append(f"RSI({rsi_value:.1f}) < {self.rsi_overbought}")
+                    else:
+                        signal_type = ""  # RSI filter failed
+                        signal_reasons.append(f"RSI too high: {rsi_value:.1f} >= {self.rsi_overbought}")
+                
+                if signal_type and self.use_volume_filter:
+                    volume_ratio = row['volume_ratio']
+                    if volume_ratio > self.volume_threshold:  # Check for increased volume
+                        signal_reasons.append(f"Volume({volume_ratio:.2f}x) > {self.volume_threshold}")
+                    else:
+                        signal_type = ""  # Volume filter failed
+                        signal_reasons.append(f"Volume too low: {volume_ratio:.2f}x < {self.volume_threshold}")
+            
+            # Check for sell signal - bearish crossover (fast EMA crosses below slow EMA)
+            elif crossover_value == -1:
                 signal_type = "sell"
+                signal_reasons.append(f"EMA Crossover: Fast({self.fast_ema}) < Slow({self.slow_ema})")
+                
+                # 200-EMA trend filter disabled
+                # Keeping original volatility check logic intact
+                if self.use_dynamic_trend_filter:
+                    atr_pct = row['atr_pct']
+                    if atr_pct > self.atr_low_threshold:
+                        # In higher volatility - 200 EMA filter disabled
+                        signal_reasons.append(f"200-EMA filter disabled for more signals")
+                    else:
+                        # In low volatility, ignore trend filter
+                        signal_reasons.append(f"ATR({atr_pct:.4f}) < {self.atr_low_threshold:.4f} - Low volatility, trend filter bypassed")
+                
+                # Apply additional filters if enabled
+                if signal_type and self.use_rsi_filter:
+                    rsi_value = row['rsi']
+                    if rsi_value > self.rsi_oversold:  # Check RSI is not oversold
+                        signal_reasons.append(f"RSI({rsi_value:.1f}) > {self.rsi_oversold}")
+                    else:
+                        signal_type = ""  # RSI filter failed
+                        signal_reasons.append(f"RSI too low: {rsi_value:.1f} <= {self.rsi_oversold}")
+                
+                if signal_type and self.use_volume_filter:
+                    volume_ratio = row['volume_ratio']
+                    if volume_ratio > self.volume_threshold:  # Check for increased volume
+                        signal_reasons.append(f"Volume({volume_ratio:.2f}x) > {self.volume_threshold}")
+                    else:
+                        signal_type = ""  # Volume filter failed
+                        signal_reasons.append(f"Volume too low: {volume_ratio:.2f}x < {self.volume_threshold}")
         
-        # Additional conditions for signal validity
-        if signal_type:
-            # Avoid trading with insufficient data (need at least 50 bars for reliable indicators)
-            if len(df) < 50:
+        # Check if there was a recent trade (reduce overtrading)
+        if signal_type and self.last_signal_time is not None:
+            current_time = row.name if hasattr(row, 'name') else df.index[index]
+            
+            # Skip if too soon after last trade
+            if (current_time - self.last_signal_time).total_seconds() < self.min_bars_between_trades * 14400:  # 4 hours = 14400 seconds
                 signal_type = ""
-                
-            # Apply RSI filter for confirmation
-            if self.use_rsi_filter:
-                current_rsi = row['rsi']
-                
-                # For long signals, RSI should not be overbought
-                if signal_type == "buy" and current_rsi > self.rsi_overbought:
-                    logger.info(f"Rejecting buy signal: RSI {current_rsi:.1f} is overbought (>{self.rsi_overbought})")
-                    signal_type = ""
-                
-                # For short signals, RSI should not be oversold
-                elif signal_type == "sell" and current_rsi < self.rsi_oversold:
-                    logger.info(f"Rejecting sell signal: RSI {current_rsi:.1f} is oversold (<{self.rsi_oversold})")
-                    signal_type = ""
-            
-            # Apply volume filter for confirmation
-            if self.use_volume_filter and signal_type:
-                # Only take signals with significant volume
-                if not row['volume_spike'] and row['volume_ratio'] < self.volume_threshold:
-                    logger.info(f"Rejecting {signal_type} signal: Insufficient volume (ratio: {row['volume_ratio']:.2f})")
-                    signal_type = ""
-            
-            # Check if there was a recent trade (reduce overtrading)
-            if self.last_signal_time is not None and signal_type:
-                min_bars_between_trades = 2  # Reduced from 5 to 2 for 4h timeframe
-                current_time = row.name if hasattr(row, 'name') else df.index[index]
-                
-                # Skip if too soon after last trade
-                if (current_time - self.last_signal_time).total_seconds() < min_bars_between_trades * 14400:  # 4 hours = 14400 seconds
-                    signal_type = ""
+                signal_reasons.append(f"Too soon after last trade at {self.last_signal_time}")
+        
+        # Log full reasoning if a signal was generated
+        if signal_type:
+            reason_str = " + ".join(signal_reasons)
+            logger.info(f"Generated {signal_type.upper()} signal for {self.symbol}: {reason_str}")
+        elif signal_reasons:
+            # Log why a potential signal was rejected
+            reason_str = " | ".join(signal_reasons)
+            logger.debug(f"Rejected signal for {self.symbol}: {reason_str}")
         
         return signal_type
     
@@ -405,7 +457,22 @@ class EMACrossoverStrategy(BaseStrategy):
         
         # Calculate position size based on volatility targeting
         try:
-            if 'atr' in bar_data and not pd.isna(bar_data['atr']) and hasattr(self.config, 'USE_VOLATILITY_SIZING') and self.config.USE_VOLATILITY_SIZING:
+            # Get recent profit factor from health monitor if available
+            pf_recent = None
+            if hasattr(self, 'health_monitor') and self.health_monitor:
+                pf_recent = self.health_monitor.get_profit_factor_last_n(40)
+                
+            # Use portfolio manager if available with edge-weighted sizing
+            if hasattr(self, 'allocator') and self.allocator:
+                position_size, _, _ = self.allocator.calculate_position_size(
+                    symbol=self.symbol,
+                    current_price=current_price,
+                    atr_value=atr_value if self.last_atr_value else current_price * 0.02,  # Fallback to 2% of price
+                    strat_name="ema_crossover",
+                    pf_recent=pf_recent,
+                    side=side
+                )
+            elif 'atr' in bar_data and not pd.isna(bar_data['atr']) and hasattr(self, 'use_volatility_sizing') and self.use_volatility_sizing:
                 # Volatility-targeted position sizing
                 dollar_risk = self.account_balance * self.vol_target_pct  # Target volatility (0.75%)
                 position_size = dollar_risk / atr_value  # Size inversely proportional to volatility
@@ -527,10 +594,13 @@ class EMACrossoverStrategy(BaseStrategy):
         # Progressive trailing stop based on profit
         # More aggressive trailing as profit increases
         if r_multiple >= 2.0:
-            # When profit >= 2R, use tighter trailing (0.75 × ATR)
-            trail_multiplier = 0.75
+            # When profit >= 2R, use even tighter trailing (0.5 × ATR)
+            trail_multiplier = 0.5
         elif r_multiple >= 1.0:
-            # When profit >= 1R, use normal trailing (1.0 × ATR)
+            # When profit >= 1R, use tighter trailing (0.75 × ATR)
+            trail_multiplier = 0.75
+        elif r_multiple >= 0.5:
+            # When profit >= 0.5R, use normal trailing (1.0 × ATR)
             trail_multiplier = 1.0
         else:
             # Default trailing stop multiplier
@@ -550,10 +620,10 @@ class EMACrossoverStrategy(BaseStrategy):
                     # Only update if it would move the stop higher (for long positions)
                     if trade['trailing_stop'] is None or new_trailing_stop > trade['trailing_stop']:
                         trade['trailing_stop'] = new_trailing_stop
-                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f})")
+                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f}, multiplier={trail_multiplier})")
                         
-                        # Once we're at 1R profit, make sure trailing stop is at least at breakeven
-                        if r_multiple >= 1.0 and new_trailing_stop < trade['entry_price']:
+                        # Once we're at 0.5R profit, make sure trailing stop is at least at breakeven
+                        if r_multiple >= 0.5 and new_trailing_stop < trade['entry_price']:
                             trade['trailing_stop'] = trade['entry_price']
                             logger.info(f"Moved trailing stop to breakeven at {trade['entry_price']:.2f}")
         else:  # short position
@@ -569,10 +639,10 @@ class EMACrossoverStrategy(BaseStrategy):
                     # Only update if it would move the stop lower (for short positions)
                     if trade['trailing_stop'] is None or new_trailing_stop < trade['trailing_stop']:
                         trade['trailing_stop'] = new_trailing_stop
-                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f})")
+                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f}, multiplier={trail_multiplier})")
                         
-                        # Once we're at 1R profit, make sure trailing stop is at least at breakeven
-                        if r_multiple >= 1.0 and new_trailing_stop > trade['entry_price']:
+                        # Once we're at 0.5R profit, make sure trailing stop is at least at breakeven
+                        if r_multiple >= 0.5 and new_trailing_stop > trade['entry_price']:
                             trade['trailing_stop'] = trade['entry_price']
                             logger.info(f"Moved trailing stop to breakeven at {trade['entry_price']:.2f}")
         
@@ -828,7 +898,11 @@ class EMACrossoverStrategy(BaseStrategy):
             # Calculate profit factor
             gross_profit = sum(t.pnl for t in trades if t.pnl and t.pnl > 0)
             gross_loss = abs(sum(t.pnl for t in trades if t.pnl and t.pnl <= 0))
-            profit_factor = gross_profit / gross_loss if gross_loss > 0 else float('inf')
+            
+            # Use the utility function with MIN_LOSS floor
+            winners = [t.pnl for t in trades if t.pnl and t.pnl > 0]
+            losers = [t.pnl for t in trades if t.pnl and t.pnl <= 0]
+            profit_factor_val = profit_factor(winners, losers)
             
             # Calculate average return percentage
             avg_return = sum(t.pnl_percent for t in trades if t.pnl_percent is not None) / total_trades
@@ -838,7 +912,7 @@ class EMACrossoverStrategy(BaseStrategy):
                 'winning_trades': winning_trades,
                 'losing_trades': losing_trades,
                 'win_rate': win_rate,
-                'profit_factor': profit_factor,
+                'profit_factor': profit_factor_val,
                 'avg_return': avg_return
             }
             
@@ -867,4 +941,120 @@ class EMACrossoverStrategy(BaseStrategy):
         Args:
             allocator: Portfolio allocator instance
         """
-        self.allocator = allocator 
+        self.allocator = allocator
+
+    def generate_signals(self, df):
+        """
+        Generate trading signals based on EMA crossovers and filters.
+        This method is used by the backtest system.
+        
+        Args:
+            df: DataFrame with OHLCV data
+            
+        Returns:
+            DataFrame with signals added
+        """
+        # Apply indicators first (EMAs, ATR, RSI, etc.)
+        df = self.apply_indicators(df)
+        
+        # Add a signal column
+        df['signal'] = 0
+        
+        # Generate signals based on crossover events
+        for i in range(1, len(df)):
+            # Check for crossover events
+            if df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i] and df['ema_fast'].iloc[i-1] <= df['ema_slow'].iloc[i-1]:
+                # Fast EMA crosses above slow EMA - potential buy signal
+                if self.use_dynamic_trend_filter:
+                    # Skip trend filter if volatility is low
+                    if df['atr_pct'].iloc[i] < self.atr_low_threshold:
+                        trend_filter_passed = True
+                        trend_note = f"ATR({df['atr_pct'].iloc[i]:.4f}) < {self.atr_low_threshold} - Low volatility, trend filter bypassed"
+                    else:
+                        # Apply trend filter - price should be above the trend EMA
+                        trend_filter_passed = df['close'].iloc[i] > df['ema_trend'].iloc[i]
+                        trend_note = "200-EMA filter disabled for more signals"
+                else:
+                    trend_filter_passed = True
+                    trend_note = "200-EMA filter disabled for more signals"
+                
+                # Apply RSI filter - don't buy if RSI is already overbought
+                rsi_filter_passed = not self.use_rsi_filter or df['rsi'].iloc[i] < self.rsi_overbought
+                rsi_note = f"RSI({df['rsi'].iloc[i]:.1f}) < {self.rsi_overbought}"
+                
+                # Apply volume filter - higher than average volume
+                volume_filter_passed = not self.use_volume_filter or df['volume_ratio'].iloc[i] > self.volume_threshold
+                volume_note = f"Volume({df['volume_ratio'].iloc[i]:.2f}x) > {self.volume_threshold}"
+                
+                # Set buy signal if all filters pass
+                if trend_filter_passed and rsi_filter_passed and volume_filter_passed:
+                    df.loc[df.index[i], 'signal'] = 1
+                    df.loc[df.index[i], 'signal_reason'] = f"EMA Crossover: Fast({self.fast_ema}) > Slow({self.slow_ema}) + {trend_note} + {rsi_note} + {volume_note}"
+                
+            elif df['ema_fast'].iloc[i] < df['ema_slow'].iloc[i] and df['ema_fast'].iloc[i-1] >= df['ema_slow'].iloc[i-1]:
+                # Fast EMA crosses below slow EMA - potential sell signal
+                if self.use_dynamic_trend_filter:
+                    # Skip trend filter if volatility is low
+                    if df['atr_pct'].iloc[i] < self.atr_low_threshold:
+                        trend_filter_passed = True
+                        trend_note = f"ATR({df['atr_pct'].iloc[i]:.4f}) < {self.atr_low_threshold} - Low volatility, trend filter bypassed"
+                    else:
+                        # Apply trend filter - price should be below the trend EMA
+                        trend_filter_passed = df['close'].iloc[i] < df['ema_trend'].iloc[i]
+                        trend_note = "200-EMA filter disabled for more signals"
+                else:
+                    trend_filter_passed = True
+                    trend_note = "200-EMA filter disabled for more signals"
+                
+                # Apply RSI filter - don't sell if RSI is already oversold
+                rsi_filter_passed = not self.use_rsi_filter or df['rsi'].iloc[i] > self.rsi_oversold
+                rsi_note = f"RSI({df['rsi'].iloc[i]:.1f}) > {self.rsi_oversold}"
+                
+                # Apply volume filter - higher than average volume
+                volume_filter_passed = not self.use_volume_filter or df['volume_ratio'].iloc[i] > self.volume_threshold
+                volume_note = f"Volume({df['volume_ratio'].iloc[i]:.2f}x) > {self.volume_threshold}"
+                
+                # Set sell signal if all filters pass
+                if trend_filter_passed and rsi_filter_passed and volume_filter_passed:
+                    df.loc[df.index[i], 'signal'] = -1
+                    df.loc[df.index[i], 'signal_reason'] = f"EMA Crossover: Fast({self.fast_ema}) < Slow({self.slow_ema}) + {trend_note} + {rsi_note} + {volume_note}"
+        
+        # Add signal type for logging
+        df['signal_type'] = 'none'
+        df.loc[df['signal'] == 1, 'signal_type'] = 'buy'
+        df.loc[df['signal'] == -1, 'signal_type'] = 'sell'
+        
+        return df
+    
+    def generate_signal(self, i, df):
+        """
+        Generate trading signal for a specific candle.
+        This method is called by the backtester for each candle.
+        
+        Args:
+            i: Index of the current candle
+            df: DataFrame with indicators and previous signals
+            
+        Returns:
+            Signal type: 'buy', 'sell', or '' (empty string for no signal)
+        """
+        # Skip if not enough bars between trades
+        current_time = df.index[i]
+        if self.last_signal_time is not None and (current_time - self.last_signal_time).total_seconds() / 3600 < self.min_bars_between_trades * 4:
+            return ''
+            
+        # Get the current signal from the processed DataFrame
+        current_signal = df['signal'].iloc[i]
+        
+        if current_signal == 1:
+            signal_reason = df['signal_reason'].iloc[i] if 'signal_reason' in df.columns else "EMA Crossover: Buy signal"
+            logger.info(f"Generated BUY signal for {self.symbol}: {signal_reason}")
+            self.last_signal_time = current_time
+            return 'buy'
+        elif current_signal == -1:
+            signal_reason = df['signal_reason'].iloc[i] if 'signal_reason' in df.columns else "EMA Crossover: Sell signal"
+            logger.info(f"Generated SELL signal for {self.symbol}: {signal_reason}")
+            self.last_signal_time = current_time
+            return 'sell'
+        
+        return '' 
