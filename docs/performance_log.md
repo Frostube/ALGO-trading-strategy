@@ -1,10 +1,16 @@
-# Strategy Performance Log
+# Performance Log
 
-| Date (UTC) | Strategy | Dataset | Params | PF | Win % | DD % | Net Return % |
-|------------|----------|---------|--------|----|-------|------|--------------|
-| 2025-05-14 11:37 | Test Strategy | BTC/USDT 1h (30d) | SL 1.5×, TP 3.0× | 1.50 | 50.0 | 10.0 | 15.0 |
-| 2025-05-14 11:47 | Test Strategy | BTC/USDT 1h (30d) | SL 1.5×, TP 3.0× | 1.50 | 50.0 | 10.0 | 15.0 |
-| 2025-05-14 11:52 | ema_crossover + Regime Detection + Pyramiding | BTC/USDT 1h (30d) | Auto-logged run | 1.00 | 50.0 | 10.0 | 5.0 |
-| 2025-05-14 11:52 | Test Strategy | BTC/USDT 1h (30d) | SL 1.5×, TP 3.0× | 1.50 | 50.0 | 10.0 | 15.0 |
-| 2025-05-14 11:56 | rsi_momentum + Regime Detection + Pyramiding | ETH/USDT 4h (60d) | Auto-logged run | 1.00 | 50.0 | 10.0 | 5.0 |
-| 2025-05-14 12:20 | ema_crossover + Regime Detection + Pyramiding | BTC/USDT 5m (30d) | Auto-logged run | 1.00 | 50.0 | 10.0 | 5.0 |
+| Date | Symbols | Timeframe | Days | Total Return | Profit Factor | Win Rate | Max DD | Trades | Notes |
+|------|---------|-----------|------|--------------|---------------|----------|--------|--------|-------|
+| 2025-05-14 | BTC/USDT | 4h | 365 | -1.29% | 1.55 | 28.57% | 0.89% | 7 | |
+| 2025-05-14 | 4 symbols | 4h | 365 | -2.34% | 2.66 | 35.12% | 7.78% | 33 | |
+| 2025-05-14 | 4 symbols | 4h | 30 | 0.00% | 0.00 | 0.00% | 0.00% | 0 | |
+| 2025-05-14 | 4 symbols | 4h | 30 | 0.00% | 0.00 | 0.00% | 0.00% | 0 |  |
+| 2025-05-14 | 4 symbols | 4h | 30 | 0.00% | 0.00 | 0.00% | 0.00% | 0 |  |
+| 2025-05-14 | 4 symbols | 4h | 30 | 0.00% | 0.00 | 0.00% | 0.00% | 0 |  |
+| 2025-05-14 | 4 symbols | 4h | 30 | 1.78% | 0.00 | 0.00% | 0.13% | 0 |  |
+| 2025-05-14 | 4 symbols | 4h | 30 | -2.31% | 0.00 | 0.00% | 3.10% | 6 |  |
+| 2025-05-14 | \BTC/USDT\ | 4h | 30 | 0.00% | 0.00 | 0.00% | 0.00% | 0 |  |
+| 2025-05-14 | BTC/USDT | 4h | 30 | -1.53% | 0.00 | 0.00% | 1.53% | 1 |  |
+| 2025-05-14 | 4 symbols | 4h | 30 | -2.31% | 0.00 | 0.00% | 3.10% | 6 |  |
+| 2025-05-14 | 4 symbols | 4h | 30 | -0.80% | 0.00 | 0.00% | 1.70% | 2 |  |

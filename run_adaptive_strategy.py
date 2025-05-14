@@ -20,6 +20,8 @@ import argparse
 import os
 import sys
 import json
+import numpy as np
+import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -210,6 +212,9 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
     # Run backtests for each symbol individually
     all_results = {}
     total_trades = 0
+    combined_equity_curve = None
+    combined_equity_dates = None
+    health_alerts = []  # Track health monitor alerts
     
     for symbol in symbols:
         logger.info(f"Running backtest for {symbol}...")
@@ -226,6 +231,16 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
         # Get parameters for this symbol
         symbol_params = params.get(symbol, default_params)
         
+        # Create health monitor for this symbol
+        health_monitor = HealthMonitor(
+            strategy_name="ema_crossover",
+            symbol=symbol,
+            window_size=40,  # Track last 40 trades
+            min_profit_factor=1.0,  # Minimum profit factor of 1.0
+            min_win_rate=0.35,  # Minimum win rate of 35%
+            notification_enabled=True
+        )
+        
         # Create strategy with parameters
         strategy = EMACrossoverStrategy(
             symbol=symbol,
@@ -240,7 +255,8 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
             use_volatility_sizing=symbol_params.get('use_volatility_sizing', True),
             vol_target_pct=symbol_params.get('vol_target_pct', 0.0075),
             enable_pyramiding=symbol_params.get('enable_pyramiding', True),
-            max_pyramid_entries=symbol_params.get('max_pyramid_entries', 2)
+            max_pyramid_entries=symbol_params.get('max_pyramid_entries', 2),
+            health_monitor=health_monitor  # Add health monitor to strategy
         )
         
         # Initialize backtester with data
@@ -256,6 +272,66 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
         # Run backtest
         strategy_results = backtester._backtest_strategy(strategy, df_with_indicators)
         
+        # Process trades through health monitor
+        if 'trades' in strategy_results:
+            for trade in strategy_results['trades']:
+                # Convert trade format to what health monitor expects
+                health_trade = {
+                    'pnl': trade['pnl'],
+                    'entry_time': trade['entry_time'],
+                    'exit_time': trade['exit_time'],
+                    'symbol': symbol
+                }
+                
+                # Process the trade
+                continue_trading = health_monitor.on_trade_closed(health_trade)
+                
+                if not continue_trading:
+                    pf = health_monitor.get_profit_factor()
+                    wr = health_monitor.get_win_rate()
+                    alert_msg = (f"⚠️ Health monitor triggered pause for {symbol}: "
+                               f"PF={pf:.2f}, Win={wr*100:.1f}%")
+                    logger.warning(alert_msg)
+                    health_alerts.append(alert_msg)
+        
+        # For testing: Inject synthetic trades into first symbol's health monitor
+        # This simulates a degraded strategy with declining performance to test health alerts
+        if symbol == symbols[0] and days == 30:  # Only for time-lapse test on first symbol
+            logger.info("Injecting test trade data to evaluate health monitor...")
+            
+            # Create a series of losing trades to trigger health monitor
+            test_trades = []
+            # Need at least the window size (40) trades for reliable monitoring
+            for i in range(45):
+                # Create a poor performance scenario: 25% win rate and poor profit factor
+                is_win = (i % 4 == 0)  # Every 4th trade is a winner (25% win rate)
+                pnl = 50 if is_win else -40  # Profit factor around 0.8
+                
+                trade = {
+                    'pnl': pnl,
+                    'entry_time': datetime.now() - timedelta(hours=i*4),
+                    'exit_time': datetime.now() - timedelta(hours=i*4-2),
+                    'symbol': symbol
+                }
+                
+                test_trades.append(trade)
+                
+                # Process each trade through health monitor
+                continue_trading = health_monitor.on_trade_closed(trade)
+                
+                # Check if health monitor would pause trading
+                if i >= 39:  # After we have enough trades to evaluate
+                    pf = health_monitor.get_profit_factor()
+                    wr = health_monitor.get_win_rate() * 100
+                    if not continue_trading:
+                        alert_msg = (f"⚠️ HEALTH MONITOR ALERT: Trading would pause for {symbol} due to: "
+                                   f"PF={pf:.2f} (min: {health_monitor.min_profit_factor:.2f}), "
+                                   f"Win={wr:.1f}% (min: {health_monitor.min_win_rate*100:.1f}%)")
+                        logger.warning(alert_msg)
+                        health_alerts.append(alert_msg)
+                    else:
+                        logger.info(f"Health metrics for {symbol}: PF={pf:.2f}, Win={wr:.1f}%")
+        
         # Store results
         all_results[symbol] = strategy_results
         total_trades += strategy_results.get('total_trades', 0)
@@ -266,15 +342,140 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
         logger.info(f"  Profit Factor: {strategy_results.get('profit_factor', 0):.2f}")
         logger.info(f"  Win Rate: {strategy_results.get('win_rate', 0)*100:.2f}%")
         logger.info(f"  Total Trades: {strategy_results.get('total_trades', 0)}")
+        
+        # Combine equity curves
+        if 'equity_curve' in strategy_results:
+            # Store the equity curve and dates for later plotting
+            if combined_equity_curve is None:
+                combined_equity_curve = np.array(strategy_results['equity_curve'])
+                # Make sure to use the correct number of dates that match the equity curve
+                equity_dates = df_with_indicators.index[-len(strategy_results['equity_curve']):]
+                combined_equity_dates = equity_dates
+            else:
+                # Normalize the current equity curve to match the combined one
+                weight = 1.0 / len(symbols)  # Equal weight for each symbol
+                norm_factor = initial_balance / strategy_results['equity_curve'][0]
+                
+                # Get the current dates matching the equity curve
+                equity_dates = df_with_indicators.index[-len(strategy_results['equity_curve']):]
+                
+                # If lengths differ, truncate to the shorter one
+                if len(equity_dates) != len(combined_equity_dates):
+                    min_len = min(len(equity_dates), len(combined_equity_dates))
+                    equity_dates = equity_dates[-min_len:]
+                    combined_equity_dates = combined_equity_dates[-min_len:]
+                    combined_equity_curve = combined_equity_curve[-min_len:]
+                    normalized_curve = np.array(strategy_results['equity_curve'][-min_len:]) * norm_factor * weight
+                else:
+                    normalized_curve = np.array(strategy_results['equity_curve']) * norm_factor * weight
+                
+                # Add to the existing curve
+                combined_equity_curve += normalized_curve
     
     # Add summary of all symbols
     all_results['summary'] = {
         'total_trades': total_trades,
         'symbols_tested': len(all_results) - 1,  # Excluding summary
-        'per_symbol_avg_trades': total_trades / max(1, len(all_results) - 1)
+        'per_symbol_avg_trades': total_trades / max(1, len(all_results) - 1),
+        'health_alerts': health_alerts
     }
     
+    # Generate and save equity curve plot
+    if combined_equity_curve is not None:
+        generate_equity_plot(combined_equity_curve, combined_equity_dates, all_results, symbols, timeframe, days)
+    
     return all_results
+
+def generate_equity_plot(equity_curve, dates, results, symbols, timeframe, days):
+    """
+    Generate and save an equity curve plot.
+    
+    Args:
+        equity_curve: Array of equity values
+        dates: Array of date values
+        results: Dictionary of backtest results
+        symbols: List of symbols in the backtest
+        timeframe: Timeframe used
+        days: Number of days in the backtest
+    """
+    try:
+        # Ensure reports directory exists
+        Path("reports").mkdir(exist_ok=True)
+        
+        # Create plot figure
+        plt.figure(figsize=(12, 8))
+        
+        # Plot equity curve
+        plt.subplot(2, 1, 1)
+        plt.plot(dates, equity_curve, 'b-', linewidth=2)
+        plt.title(f'30-Day Time-Lapse Test Results - {timeframe} Timeframe')
+        plt.ylabel('Portfolio Equity ($)')
+        plt.grid(True)
+        
+        # Add annotations for key metrics
+        avg_return = 0
+        avg_win_rate = 0
+        profit_factor = 0
+        max_dd = 0
+        symbol_count = 0
+        
+        for key, result in results.items():
+            if key != 'summary':
+                symbol_count += 1
+                avg_return += result.get('total_return', 0) * 100  # Convert to percentage
+                avg_win_rate += result.get('win_rate', 0) * 100  # Convert to percentage
+                max_dd = max(max_dd, result.get('max_drawdown', 0) * 100)  # Convert to percentage
+                if result.get('profit_factor', 0) > profit_factor:
+                    profit_factor = result.get('profit_factor', 0)
+        
+        if symbol_count > 0:
+            avg_return /= symbol_count
+            avg_win_rate /= symbol_count
+        
+        # Calculate drawdown
+        drawdown = np.zeros_like(equity_curve)
+        peak = equity_curve[0]
+        for i, value in enumerate(equity_curve):
+            if value > peak:
+                peak = value
+            drawdown[i] = (peak - value) / peak * 100  # Convert to percentage
+        
+        # Plot drawdown
+        plt.subplot(2, 1, 2)
+        plt.plot(dates, drawdown, 'r-', linewidth=1.5)
+        plt.fill_between(dates, drawdown, alpha=0.3, color='r')
+        plt.title('Drawdown (%)')
+        plt.ylabel('Drawdown %')
+        plt.grid(True)
+        
+        # Add text with performance metrics
+        plt.figtext(0.02, 0.02, 
+                 f"Symbols: {', '.join(symbols)}\n"
+                 f"Timeframe: {timeframe}\n"
+                 f"Test Period: {days} days\n"
+                 f"Return: {avg_return:.2f}%\n"
+                 f"Profit Factor: {profit_factor:.2f}\n"
+                 f"Win Rate: {avg_win_rate:.2f}%\n"
+                 f"Max Drawdown: {max_dd:.2f}%\n"
+                 f"Total Trades: {results['summary'].get('total_trades', 0)}",
+                 fontsize=10, verticalalignment='bottom')
+        
+        # Highlight if health monitor triggered
+        if results['summary'].get('health_alerts'):
+            plt.figtext(0.5, 0.02, 
+                     "⚠️ HEALTH MONITOR ALERTS:\n" + 
+                     "\n".join(results['summary'].get('health_alerts', [])),
+                     fontsize=10, color='red', verticalalignment='bottom')
+        
+        # Save the plot
+        filename = f"reports/equity_{days}d.png"
+        plt.tight_layout(rect=[0, 0.08, 1, 0.96])  # Adjust to make room for text
+        plt.savefig(filename, dpi=120)
+        plt.close()
+        
+        logger.info(f"Equity curve plot saved to {filename}")
+    except Exception as e:
+        logger.error(f"Error generating equity plot: {str(e)}")
 
 def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015, 
                   enable_health_monitor=True, paper_mode=True, enable_notifications=False,
@@ -375,8 +576,8 @@ def log_performance_to_file(results, symbols, timeframe, days):
     if not log_file.exists():
         with open(log_file, 'w') as f:
             f.write("# Performance Log\n\n")
-            f.write("| Date | Symbols | Timeframe | Days | Total Return | Profit Factor | Win Rate | Max DD | Trades |\n")
-            f.write("|------|---------|-----------|------|--------------|---------------|----------|--------|--------|\n")
+            f.write("| Date | Symbols | Timeframe | Days | Total Return | Profit Factor | Win Rate | Max DD | Trades | Notes |\n")
+            f.write("|------|---------|-----------|------|--------------|---------------|----------|--------|--------|---------|\n")
     
     # Calculate summary metrics across all symbols
     total_trades = 0
@@ -413,9 +614,14 @@ def log_performance_to_file(results, symbols, timeframe, days):
     if len(symbols_str) > 20:
         symbols_str = f"{len(symbols)} symbols"
     
-    # Append the new entry
+    # Check for health alerts
+    notes = ""
+    if 'summary' in results and results['summary'].get('health_alerts'):
+        notes = "⚠️ Health alerts triggered"
+    
+    # Append the new entry (add Notes column)
     with open(log_file, 'a') as f:
-        f.write(f"| {today} | {symbols_str} | {timeframe} | {days} | {avg_return:.2f}% | {profit_factor:.2f} | {avg_win_rate:.2f}% | {max_dd:.2f}% | {total_trades} |\n")
+        f.write(f"| {today} | {symbols_str} | {timeframe} | {days} | {avg_return:.2f}% | {profit_factor:.2f} | {avg_win_rate:.2f}% | {max_dd:.2f}% | {total_trades} | {notes} |\n")
     
     logger.info(f"Performance logged to {log_file}")
 
@@ -494,9 +700,18 @@ def main():
                     logger.info(f"Average return: {avg_return:.2f}%")
                     logger.info(f"Winning symbols: {winning_symbols}/{summary.get('symbols_tested', 0)}")
                     
+                # Show health monitor alerts
+                if summary.get('health_alerts'):
+                    logger.warning("Health monitor alerts triggered:")
+                    for alert in summary.get('health_alerts', []):
+                        logger.warning(f"  {alert}")
+                
                 # Log performance to file if requested
                 if args.log:
                     log_performance_to_file(results, symbols, args.timeframe, args.days)
+                    
+                # Print where to find the equity plot
+                logger.info(f"Equity curve plot saved to reports/equity_{args.days}d.png")
     
     elif args.mode in ['paper', 'live-paper']:
         logger.info("Starting paper trading mode")

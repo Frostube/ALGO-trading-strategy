@@ -31,7 +31,7 @@ class EMACrossoverStrategy(BaseStrategy):
     
     def __init__(self, symbol=SYMBOL, timeframe='4h', db_session=None, account_balance=1000.0, 
                 history_days=365, auto_optimize=False, config=None,
-                fast_ema=10, slow_ema=40, trend_ema=200, atr_sl_multiplier=1.0,
+                fast_ema=8, slow_ema=21, trend_ema=50, atr_sl_multiplier=1.0,
                 risk_per_trade=0.0075, use_volatility_sizing=True, vol_target_pct=0.0075,
                 enable_pyramiding=True, max_pyramid_entries=2, health_monitor=None):
         # Initialize the base class first
@@ -63,6 +63,16 @@ class EMACrossoverStrategy(BaseStrategy):
             self.max_pyramid_entries = config.get('max_pyramid_entries', max_pyramid_entries)
             self.pyramid_threshold = config.get('pyramid_threshold', 0.5)
             self.pyramid_position_scale = config.get('pyramid_position_scale', 0.5)
+            
+            # RSI filter parameters
+            self.use_rsi_filter = config.get('use_rsi_filter', True)
+            self.rsi_period = config.get('rsi_period', 14)
+            self.rsi_oversold = config.get('rsi_oversold', 30)
+            self.rsi_overbought = config.get('rsi_overbought', 70)
+            
+            # Volume filter parameters
+            self.use_volume_filter = config.get('use_volume_filter', True)
+            self.volume_threshold = config.get('volume_threshold', 1.5)
         else:
             # Use explicitly provided parameters
             self.fast_ema = fast_ema
@@ -78,6 +88,16 @@ class EMACrossoverStrategy(BaseStrategy):
             self.max_pyramid_entries = max_pyramid_entries
             self.pyramid_threshold = 0.5  # 0.5 × ATR
             self.pyramid_position_scale = 0.5  # 50% of initial size
+            
+            # RSI filter parameters
+            self.use_rsi_filter = True
+            self.rsi_period = 14
+            self.rsi_oversold = 30
+            self.rsi_overbought = 70
+            
+            # Volume filter parameters
+            self.use_volume_filter = True
+            self.volume_threshold = 1.5
         
         # Automatically find optimal EMA pair if requested
         if auto_optimize:
@@ -184,7 +204,7 @@ class EMACrossoverStrategy(BaseStrategy):
             df.loc[df['close'] < df[f'ema_{self.trend_ema}'], 'long_term_trend'] = -1
             
             # Add RSI for confirmation
-            df = self._calculate_rsi(df, period=2)
+            df = self._calculate_rsi(df, period=self.rsi_period)
             
             # Add ATR for volatility-based stops
             df = self._calculate_atr(df, period=14)
@@ -206,7 +226,7 @@ class EMACrossoverStrategy(BaseStrategy):
             
         return df
     
-    def _calculate_rsi(self, df, period=2):
+    def _calculate_rsi(self, df, period=14):
         """Calculate RSI indicator"""
         # Calculate price changes
         df['price_change'] = df['close'].diff()
@@ -289,23 +309,44 @@ class EMACrossoverStrategy(BaseStrategy):
         # Initialize signal
         signal_type = ""
         
-        # EMA crossover signals with trend filter
+        # EMA crossover signals without trend filter
         if 'ema_crossover' in row and row['ema_crossover'] != 0:
-            # Long signal: Fast EMA crossed above slow EMA AND price > EMA200
-            if row['ema_crossover'] > 0 and row['long_term_trend'] > 0:
+            # Long signal: Fast EMA crossed above slow EMA
+            if row['ema_crossover'] > 0:
                 signal_type = "buy"
-            # Short signal: Fast EMA crossed below slow EMA AND price < EMA200
-            elif row['ema_crossover'] < 0 and row['long_term_trend'] < 0:
+            # Short signal: Fast EMA crossed below slow EMA
+            elif row['ema_crossover'] < 0:
                 signal_type = "sell"
         
         # Additional conditions for signal validity
         if signal_type:
-            # Avoid trading with insufficient data (need at least 200 bars for reliable trend)
-            if len(df) < 200:
+            # Avoid trading with insufficient data (need at least 50 bars for reliable indicators)
+            if len(df) < 50:
                 signal_type = ""
                 
+            # Apply RSI filter for confirmation
+            if self.use_rsi_filter:
+                current_rsi = row['rsi']
+                
+                # For long signals, RSI should not be overbought
+                if signal_type == "buy" and current_rsi > self.rsi_overbought:
+                    logger.info(f"Rejecting buy signal: RSI {current_rsi:.1f} is overbought (>{self.rsi_overbought})")
+                    signal_type = ""
+                
+                # For short signals, RSI should not be oversold
+                elif signal_type == "sell" and current_rsi < self.rsi_oversold:
+                    logger.info(f"Rejecting sell signal: RSI {current_rsi:.1f} is oversold (<{self.rsi_oversold})")
+                    signal_type = ""
+            
+            # Apply volume filter for confirmation
+            if self.use_volume_filter and signal_type:
+                # Only take signals with significant volume
+                if not row['volume_spike'] and row['volume_ratio'] < self.volume_threshold:
+                    logger.info(f"Rejecting {signal_type} signal: Insufficient volume (ratio: {row['volume_ratio']:.2f})")
+                    signal_type = ""
+            
             # Check if there was a recent trade (reduce overtrading)
-            if self.last_signal_time is not None:
+            if self.last_signal_time is not None and signal_type:
                 min_bars_between_trades = 2  # Reduced from 5 to 2 for 4h timeframe
                 current_time = row.name if hasattr(row, 'name') else df.index[index]
                 
@@ -470,6 +511,31 @@ class EMACrossoverStrategy(BaseStrategy):
         if self.enable_pyramiding and self.last_atr_value:
             self._check_pyramid_opportunity(current_price, latest_bar)
         
+        # Calculate profit in R multiples (risk units)
+        if trade['side'] == 'buy':
+            entry_risk = abs(trade['entry_price'] - trade['stop_loss'])
+            current_profit = current_price - trade['entry_price']
+            r_multiple = current_profit / entry_risk if entry_risk > 0 else 0
+        else:  # short position
+            entry_risk = abs(trade['stop_loss'] - trade['entry_price'])
+            current_profit = trade['entry_price'] - current_price
+            r_multiple = current_profit / entry_risk if entry_risk > 0 else 0
+        
+        # Store R multiple in trade data
+        trade['current_r'] = r_multiple
+        
+        # Progressive trailing stop based on profit
+        # More aggressive trailing as profit increases
+        if r_multiple >= 2.0:
+            # When profit >= 2R, use tighter trailing (0.75 × ATR)
+            trail_multiplier = 0.75
+        elif r_multiple >= 1.0:
+            # When profit >= 1R, use normal trailing (1.0 × ATR)
+            trail_multiplier = 1.0
+        else:
+            # Default trailing stop multiplier
+            trail_multiplier = self.atr_trail_multiplier
+        
         # Update max/min price seen for trailing stop calculations
         if trade['side'] == 'buy':
             # For long positions, track the highest price seen
@@ -478,13 +544,18 @@ class EMACrossoverStrategy(BaseStrategy):
                 
                 # Update trailing stop if applicable and ATR value is available
                 if self.last_atr_value:
-                    # Calculate new trailing stop using ATR
-                    new_trailing_stop = trade['max_price'] - (self.last_atr_value * self.atr_trail_multiplier)
+                    # Calculate new trailing stop using ATR and the adjusted multiplier
+                    new_trailing_stop = trade['max_price'] - (self.last_atr_value * trail_multiplier)
                     
                     # Only update if it would move the stop higher (for long positions)
                     if trade['trailing_stop'] is None or new_trailing_stop > trade['trailing_stop']:
                         trade['trailing_stop'] = new_trailing_stop
-                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade")
+                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f})")
+                        
+                        # Once we're at 1R profit, make sure trailing stop is at least at breakeven
+                        if r_multiple >= 1.0 and new_trailing_stop < trade['entry_price']:
+                            trade['trailing_stop'] = trade['entry_price']
+                            logger.info(f"Moved trailing stop to breakeven at {trade['entry_price']:.2f}")
         else:  # short position
             # For short positions, track the lowest price seen
             if current_price < trade['min_price']:
@@ -492,13 +563,18 @@ class EMACrossoverStrategy(BaseStrategy):
                 
                 # Update trailing stop if applicable and ATR value is available
                 if self.last_atr_value:
-                    # Calculate new trailing stop using ATR
-                    new_trailing_stop = trade['min_price'] + (self.last_atr_value * self.atr_trail_multiplier)
+                    # Calculate new trailing stop using ATR and the adjusted multiplier
+                    new_trailing_stop = trade['min_price'] + (self.last_atr_value * trail_multiplier)
                     
                     # Only update if it would move the stop lower (for short positions)
                     if trade['trailing_stop'] is None or new_trailing_stop < trade['trailing_stop']:
                         trade['trailing_stop'] = new_trailing_stop
-                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade")
+                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f})")
+                        
+                        # Once we're at 1R profit, make sure trailing stop is at least at breakeven
+                        if r_multiple >= 1.0 and new_trailing_stop > trade['entry_price']:
+                            trade['trailing_stop'] = trade['entry_price']
+                            logger.info(f"Moved trailing stop to breakeven at {trade['entry_price']:.2f}")
         
         # Check if stop loss or take profit has been hit
         if trade['side'] == 'buy':
