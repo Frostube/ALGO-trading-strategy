@@ -33,15 +33,45 @@ def fetch_ohlcv_full(ccxt_exch, symbol, tf, since_ms, limit=1000):
         List of OHLCV candles
     """
     out = []
+    retry_count = 0
+    max_retries = 5
+    
     while True:
-        batch = ccxt_exch.fetch_ohlcv(symbol, tf, since=since_ms, limit=limit)
-        if not batch:
+        try:
+            batch = ccxt_exch.fetch_ohlcv(symbol, tf, since=since_ms, limit=limit)
+            if not batch:
+                break
+                
+            since_ms = batch[-1][0] + 1  # Next ms after last candle
+            out.extend(batch)
+            
+            if len(batch) < limit:  # Final page
+                break
+                
+            # Reset retry counter after successful call
+            retry_count = 0
+            
+            # Respect rate limits
+            time.sleep(ccxt_exch.rateLimit / 1000)
+            
+        except (ConnectionResetError, ConnectionError, TimeoutError) as e:
+            retry_count += 1
+            logger.warning(f"Connection error while fetching data: {str(e)}. Retry {retry_count}/{max_retries}")
+            
+            if retry_count >= max_retries:
+                logger.error(f"Max retries reached, returning partial data with {len(out)} candles")
+                break
+                
+            # Exponential backoff
+            backoff_time = 2 ** retry_count
+            logger.info(f"Waiting {backoff_time} seconds before retry...")
+            time.sleep(backoff_time)
+            
+        except Exception as e:
+            logger.error(f"Unexpected error fetching OHLCV data: {str(e)}")
+            if len(out) > 0:
+                logger.info(f"Returning partial data with {len(out)} candles")
             break
-        since_ms = batch[-1][0] + 1  # Next ms after last candle
-        out.extend(batch)
-        if len(batch) < limit:  # Final page
-            break
-        time.sleep(ccxt_exch.rateLimit / 1000)  # Respect rate limits
     
     return out
 

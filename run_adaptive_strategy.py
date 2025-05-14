@@ -42,7 +42,7 @@ def parse_args():
                        help='Comma-separated list of symbols to trade')
     parser.add_argument('--timeframe', type=str, default="4h",
                        help='Timeframe to use (default: 4h)')
-    parser.add_argument('--mode', type=str, choices=['live', 'paper', 'backtest'], default='backtest',
+    parser.add_argument('--mode', type=str, choices=['live', 'paper', 'live-paper', 'backtest'], default='backtest',
                        help='Trading mode (default: backtest)')
     parser.add_argument('--days', type=int, default=90,
                        help='Days of historical data for backtest (default: 90)')
@@ -52,12 +52,16 @@ def parse_args():
                        help='Run parameter optimization before trading')
     parser.add_argument('--use_cached_params', action='store_true',
                        help='Use only cached parameters from file, skip optimization')
+    parser.add_argument('--force_reopt', action='store_true',
+                       help='Force re-optimization even if cached parameters exist')
     parser.add_argument('--health-monitor', action='store_true',
                        help='Enable health monitoring')
     parser.add_argument('--risk-cap', type=float, default=0.015,
                        help='Maximum portfolio risk cap (default: 0.015 = 1.5%%)')
     parser.add_argument('--notifications', action='store_true',
                        help='Enable notifications')
+    parser.add_argument('--log', action='store_true',
+                       help='Log results to docs/performance_log.md')
     parser.add_argument('--debug', action='store_true',
                        help='Enable debug logging')
     return parser.parse_args()
@@ -82,6 +86,19 @@ def load_optimized_params(symbol, timeframe):
         return None
     
     try:
+        # Check parameter file age
+        file_time = datetime.fromtimestamp(params_file.stat().st_mtime)
+        now = datetime.now()
+        age_days = (now - file_time).total_seconds() / (24 * 3600)
+        
+        logger.info(f"Params age: {age_days:.1f} d")
+        
+        # Warn and skip live trading if parameters are too old
+        if age_days > 2 and 'live' in sys.argv:
+            logger.warning(f"Parameters for {symbol} are older than 2 days ({age_days:.1f} days). Skipping live trading.")
+            logger.warning("Use --force_reopt to run optimization now.")
+            return None
+            
         with open(params_file, 'r') as f:
             params_list = json.load(f)
             
@@ -91,6 +108,13 @@ def load_optimized_params(symbol, timeframe):
             
         # Use the first parameter set (highest ranked)
         params = params_list[0]
+        
+        # Add timestamp information if not already present
+        if 'meta' not in params:
+            params['meta'] = {}
+        
+        if 'optimized_date' not in params['meta']:
+            params['meta']['optimized_date'] = file_time.strftime('%Y-%m-%d')
         
         logger.info(f"Loaded optimized parameters for {symbol} on {timeframe}: "
                    f"EMA {params.get('ema_fast', 'N/A')}/{params.get('ema_slow', 'N/A')}/{params.get('ema_trend', 'N/A')}, "
@@ -331,6 +355,69 @@ def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015,
     logger.info(f"Starting {mode} for {len(symbols)} symbols: {', '.join(symbols)}")
     trader.run()
 
+def log_performance_to_file(results, symbols, timeframe, days):
+    """
+    Log backtest performance results to docs/performance_log.md.
+    
+    Args:
+        results: Dictionary of backtest results
+        symbols: List of symbols that were backtested
+        timeframe: Timeframe used for the backtest
+        days: Number of days of data used for the backtest
+    """
+    log_file = Path("docs/performance_log.md")
+    
+    # Create directory if it doesn't exist
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Create the file with headers if it doesn't exist
+    if not log_file.exists():
+        with open(log_file, 'w') as f:
+            f.write("# Performance Log\n\n")
+            f.write("| Date | Symbols | Timeframe | Days | Total Return | Profit Factor | Win Rate | Max DD | Trades |\n")
+            f.write("|------|---------|-----------|------|--------------|---------------|----------|--------|--------|\n")
+    
+    # Calculate summary metrics across all symbols
+    total_trades = 0
+    total_return = 0
+    total_win_rate = 0
+    max_dd = 0
+    profit_factor = 0
+    
+    symbol_count = 0
+    
+    for key, result in results.items():
+        if key != 'summary':
+            symbol_count += 1
+            total_trades += result.get('total_trades', 0)
+            total_return += result.get('total_return', 0) * 100  # Convert to percentage
+            total_win_rate += result.get('win_rate', 0) * 100  # Convert to percentage
+            max_dd = max(max_dd, result.get('max_drawdown', 0) * 100)  # Convert to percentage
+            if result.get('profit_factor', 0) > profit_factor:
+                profit_factor = result.get('profit_factor', 0)
+    
+    # Calculate averages
+    if symbol_count > 0:
+        avg_return = total_return / symbol_count
+        avg_win_rate = total_win_rate / symbol_count
+    else:
+        avg_return = 0
+        avg_win_rate = 0
+    
+    # Format the date
+    today = datetime.now().strftime('%Y-%m-%d')
+    
+    # Format the symbols
+    symbols_str = ", ".join(symbols)
+    if len(symbols_str) > 20:
+        symbols_str = f"{len(symbols)} symbols"
+    
+    # Append the new entry
+    with open(log_file, 'a') as f:
+        f.write(f"| {today} | {symbols_str} | {timeframe} | {days} | {avg_return:.2f}% | {profit_factor:.2f} | {avg_win_rate:.2f}% | {max_dd:.2f}% | {total_trades} |\n")
+    
+    logger.info(f"Performance logged to {log_file}")
+
 def main():
     """Main entry point for the script."""
     args = parse_args()
@@ -349,7 +436,7 @@ def main():
     params = {}
     
     # Skip optimization if using cached parameters only
-    if args.use_cached_params:
+    if args.use_cached_params and not args.force_reopt:
         logger.info("Using cached parameters only (skipping optimization)")
         for symbol in symbols:
             symbol_params = load_optimized_params(symbol, args.timeframe)
@@ -357,14 +444,16 @@ def main():
                 params[symbol] = symbol_params
             else:
                 logger.warning(f"No cached parameters found for {symbol}, will use defaults")
+    # Force re-optimization if requested
+    elif args.force_reopt:
+        logger.info("Forcing re-optimization for all symbols")
+        optim_params = optimize_parameters(symbols, args.timeframe)
+        params.update(optim_params)
     # Run optimization if requested
     elif args.optimize:
         logger.info("Running parameter optimization")
         optim_params = optimize_parameters(symbols, args.timeframe)
-        
-        # Update params with optimized values
         params.update(optim_params)
-    
     # Load optimized parameters if not optimizing
     else:
         for symbol in symbols:
@@ -403,8 +492,13 @@ def main():
                     avg_return = total_return / summary.get('symbols_tested', 1)
                     logger.info(f"Average return: {avg_return:.2f}%")
                     logger.info(f"Winning symbols: {winning_symbols}/{summary.get('symbols_tested', 0)}")
+                    
+                # Log performance to file if requested
+                if args.log:
+                    log_performance_to_file(results, symbols, args.timeframe, args.days)
     
-    elif args.mode == 'paper':
+    elif args.mode in ['paper', 'live-paper']:
+        logger.info("Starting paper trading mode")
         run_live_trading(symbols, args.timeframe, args.initial_balance, 
                         risk_cap=args.risk_cap,
                         enable_health_monitor=args.health_monitor,

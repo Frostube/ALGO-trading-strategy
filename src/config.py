@@ -48,6 +48,9 @@ USE_TRAILING_STOP = True  # Enable trailing stops
 TRAIL_ATR_MULTIPLIER = 1.0  # Use 1× ATR for trailing stops
 TRAIL_ACTIVATION_PCT = 0.005  # Activate trailing stop after 0.5% move in our favor
 
+# Two-leg stop settings (for scalping strategy)
+USE_TWO_LEG_STOP = False  # Disable two-leg stop by default
+
 # Volatility-based position sizing
 USE_VOLATILITY_SIZING = True  # New setting for volatility-targeted position sizing
 VOL_TARGET_PCT = 0.0075  # Target 0.75% volatility per trade
