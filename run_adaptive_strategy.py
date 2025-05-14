@@ -296,37 +296,45 @@ def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015,
     from src.execution.trader import Trader
     
     # Set up portfolio risk manager
-    risk_manager = PortfolioRiskManager(
+    portfolio_manager = PortfolioRiskManager(
         account_equity=initial_balance,
-        max_portfolio_risk=risk_cap,
-        risk_per_trade=0.0075,
-        max_position_pct=0.20
+        max_portfolio_risk=risk_cap
+    )
+    
+    # Initialize trader
+    trader = Trader(
+        symbols=symbols,
+        timeframe=timeframe,
+        initial_balance=initial_balance,
+        paper_mode=paper_mode
     )
     
     # Set up health monitor if enabled
-    health_monitor = None
+    health_monitors = {}
     if enable_health_monitor:
-        health_monitor = HealthMonitor(
-            window_size=40,
-            min_trades=10,
-            degradation_threshold=0.3
-        )
+        for symbol in symbols:
+            health_monitors[symbol] = HealthMonitor(
+                strategy_name="ema_crossover",
+                symbol=symbol,
+                window_size=40,  # Track last 40 trades
+                min_profit_factor=1.0,  # Minimum profit factor of 1.0
+                min_win_rate=0.35,  # Minimum win rate of 35%
+                notification_enabled=enable_notifications
+            )
     
-    # Initialize strategies for each symbol
-    strategies = {}
-    
+    # Set up strategies for each symbol
     for symbol in symbols:
-        # Get parameters for this symbol
-        symbol_params = None
-        if params and symbol in params:
-            symbol_params = params[symbol]
-        else:
-            symbol_params = load_optimized_params(symbol, timeframe)
+        # Load parameters for this symbol
+        symbol_params = params.get(symbol) if params else None
         
-        # Create strategy instance
+        # Initialize strategy
+        from src.strategy.ema_crossover import EMACrossoverStrategy
+        
         strategy = EMACrossoverStrategy(
             symbol=symbol,
             timeframe=timeframe,
+            account_balance=initial_balance,
+            auto_optimize=False,  # Don't auto-optimize when we already have parameters
             fast_ema=symbol_params.get('ema_fast', 10) if symbol_params else 10,
             slow_ema=symbol_params.get('ema_slow', 40) if symbol_params else 40,
             trend_ema=symbol_params.get('ema_trend', 200) if symbol_params else 200,
@@ -336,23 +344,16 @@ def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015,
             vol_target_pct=symbol_params.get('vol_target_pct', 0.0075) if symbol_params else 0.0075,
             enable_pyramiding=symbol_params.get('enable_pyramiding', True) if symbol_params else True,
             max_pyramid_entries=symbol_params.get('max_pyramid_entries', 2) if symbol_params else 2,
-            health_monitor=health_monitor
+            health_monitor=health_monitors.get(symbol)
         )
         
-        strategies[symbol] = strategy
-    
-    # Initialize trader
-    trader = Trader(
-        strategies=strategies,
-        risk_manager=risk_manager,
-        initial_balance=initial_balance,
-        paper_mode=paper_mode,
-        enable_notifications=enable_notifications
-    )
+        # Add strategy to trader
+        trader.add_strategy(symbol, strategy)
     
     # Run the trader
     mode = "paper trading" if paper_mode else "LIVE TRADING"
-    logger.info(f"Starting {mode} for {len(symbols)} symbols: {', '.join(symbols)}")
+    logger.info(f"Starting {mode} with {len(symbols)} symbols...")
+    
     trader.run()
 
 def log_performance_to_file(results, symbols, timeframe, days):

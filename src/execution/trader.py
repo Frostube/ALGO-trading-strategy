@@ -3,9 +3,10 @@ import ccxt.pro as ccxtpro
 import ccxt
 from datetime import datetime, timedelta
 import json
+import time
 
 from src.config import (
-    EXCHANGE, SYMBOL, BINANCE_API_KEY, BINANCE_SECRET_KEY,
+    EXCHANGE, SYMBOL, BINANCE_API_KEY, BINANCE_SECRET_KEY, ORDER_TIMEOUT_MS,
     FUTURES, STOP_LOSS_PCT, TAKE_PROFIT_PCT
 )
 from src.utils.logger import logger, log_trade, log_alert
@@ -17,28 +18,193 @@ class Trader:
     In paper trading mode it simulates orders without real execution.
     """
     
-    def __init__(self, db_session, paper_trading=True):
-        """Initialize the trader."""
-        self.db_session = db_session
-        self.paper_trading = paper_trading
-        self.symbol = SYMBOL
-        self.exchange_id = EXCHANGE
+    def __init__(self, symbols=None, timeframe="4h", initial_balance=10000, paper_mode=True):
+        """
+        Initialize the trader.
         
-        # Setup REST client for order execution
-        self.rest_exchange = getattr(ccxt, self.exchange_id)({
-            'apiKey': BINANCE_API_KEY,
-            'secret': BINANCE_SECRET_KEY,
-            'enableRateLimit': True,
-            'options': {
-                'defaultType': 'future' if FUTURES else 'spot'
-            }
-        })
+        Args:
+            symbols: List of symbols to trade
+            timeframe: Timeframe to use
+            initial_balance: Initial account balance
+            paper_mode: Whether to use paper trading mode
+        """
+        self.symbols = symbols if symbols else [SYMBOL]
+        self.timeframe = timeframe
+        self.initial_balance = initial_balance
+        self.paper_mode = paper_mode
+        self.exchange_id = EXCHANGE
+        self.order_timeout_ms = ORDER_TIMEOUT_MS
+        
+        # Strategies by symbol
+        self.strategies = {}
         
         # Active trade tracking
         self.active_orders = {}
         self.active_trades = {}
         
-        logger.info(f"Trader initialized in {'paper trading' if paper_trading else 'live trading'} mode")
+        logger.info(f"Trader initialized in {'paper trading' if paper_mode else 'live trading'} mode "
+                   f"for {len(self.symbols)} symbols on {timeframe} timeframe with ${initial_balance} initial balance")
+    
+    def add_strategy(self, symbol, strategy):
+        """Add a strategy for a symbol."""
+        self.strategies[symbol] = strategy
+        logger.info(f"Added {strategy.__class__.__name__} for {symbol}")
+    
+    def run(self):
+        """Run the trader in live mode."""
+        logger.info("Starting trading engine...")
+        
+        for symbol in self.symbols:
+            if symbol not in self.strategies:
+                logger.warning(f"No strategy defined for {symbol}, skipping")
+                continue
+                
+            logger.info(f"Initializing {symbol} strategy...")
+            strategy = self.strategies[symbol]
+            
+            # Strategy specific initialization
+            if hasattr(strategy, 'initialize'):
+                strategy.initialize()
+        
+        logger.info("Trading engine started")
+        
+        # Run in paper mode
+        if self.paper_mode:
+            self._run_paper_mode()
+        else:
+            self._run_live_mode()
+    
+    def _run_paper_mode(self):
+        """Run in paper trading mode."""
+        logger.info("Paper trading mode active")
+        try:
+            # Main loop would be here
+            # For demonstration, we'll just keep it running
+            logger.info("Paper trading started, press Ctrl+C to stop")
+            while True:
+                time.sleep(60)
+                # In real implementation, this would check for new candles and update strategy
+        except KeyboardInterrupt:
+            logger.info("Paper trading stopped by user")
+    
+    def _run_live_mode(self):
+        """Run in live trading mode."""
+        logger.info("Live trading mode active")
+        try:
+            # Main loop would be here
+            logger.info("Live trading started, press Ctrl+C to stop")
+            while True:
+                time.sleep(60)
+                # In real implementation, this would check for new candles and update strategy
+        except KeyboardInterrupt:
+            logger.info("Live trading stopped by user")
+            
+    def execute_market_order(self, symbol, side, size):
+        """
+        Execute a market order (real or simulated).
+        
+        Args:
+            symbol: Trading pair
+            side: 'buy' or 'sell'
+            size: Position size
+            
+        Returns:
+            dict: Order information
+        """
+        price = self._get_current_price(symbol)
+        
+        if self.paper_mode:
+            # Simulate execution in paper trading mode
+            order_id = f"paper_{datetime.now().timestamp()}"
+            commission = price * size * 0.0004  # Simulate 0.04% commission
+            
+            order = {
+                'id': order_id,
+                'symbol': symbol,
+                'side': side,
+                'type': 'market',
+                'price': price,
+                'amount': size,
+                'cost': price * size,
+                'commission': commission,
+                'timestamp': datetime.now().timestamp() * 1000,
+                'datetime': datetime.now().isoformat(),
+                'status': 'closed'
+            }
+            
+            logger.info(f"Paper trade executed: {side} {size} {symbol} at {price}, Commission ${commission:.2f}")
+            return order
+        else:
+            # TODO: Implement live trading with CCXT
+            logger.error("Live trading not yet implemented")
+            return None
+            
+    def execute_limit_order(self, symbol, side, size, price, is_maker_only=True):
+        """
+        Execute a limit order with maker-first logic.
+        
+        Args:
+            symbol: Trading pair
+            side: 'buy' or 'sell'
+            size: Position size
+            price: Limit price
+            is_maker_only: If True, require the order to be a maker order
+            
+        Returns:
+            dict: Order information
+        """
+        if self.paper_mode:
+            # Simulate execution in paper trading mode
+            order_id = f"paper_limit_{datetime.now().timestamp()}"
+            commission = price * size * 0.0002  # Simulate 0.02% maker commission
+            
+            order = {
+                'id': order_id,
+                'symbol': symbol,
+                'side': side,
+                'type': 'limit',
+                'price': price,
+                'amount': size,
+                'cost': price * size,
+                'commission': commission,
+                'timestamp': datetime.now().timestamp() * 1000,
+                'datetime': datetime.now().isoformat(),
+                'status': 'open'
+            }
+            
+            # Simulate maker order with timeout
+            logger.info(f"Paper limit order placed: {side} {size} {symbol} at {price}, waiting up to {self.order_timeout_ms}ms for fill")
+            
+            # In paper trading, we'll simulate that the order gets filled after a short delay
+            time.sleep(0.5)  # Simulate 500ms delay
+            
+            # Simulate the order being filled
+            order['status'] = 'closed'
+            
+            logger.info(f"Paper limit order filled: {side} {size} {symbol} at {price}, Commission ${commission:.2f}")
+            return order
+        else:
+            # TODO: Implement live trading with CCXT and maker-first logic with ORDER_TIMEOUT_MS
+            logger.error("Live trading not yet implemented")
+            return None
+    
+    def _get_current_price(self, symbol):
+        """Get the current price for a symbol (simulated in paper mode)."""
+        # In a real implementation, this would fetch the actual current price
+        # For demonstration, we'll just return a static value
+        return 40000.0  # Simulated BTC price
+        
+    async def update_trades(self, current_price):
+        """
+        Update active trades based on current price.
+        For paper trading, simulates stop loss and take profit triggers.
+        For live trading, check order status updates.
+        
+        Args:
+            current_price: Current price of the asset
+        """
+        # Implementation would be here
+        pass
     
     async def initialize_ws_exchange(self):
         """Initialize WebSocket exchange for real-time data."""
@@ -96,7 +262,7 @@ class Trader:
         }
         
         # Execute the trade
-        if self.paper_trading:
+        if self.paper_mode:
             # Simulate execution in paper trading mode
             trade_id = f"paper_{datetime.now().timestamp()}"
             trade_info['id'] = trade_id
@@ -205,7 +371,7 @@ class Trader:
         """
         closed_trades = []
         
-        if self.paper_trading:
+        if self.paper_mode:
             # Paper trading mode
             for trade_id, trade in list(self.active_trades.items()):
                 if trade['status'] != 'open':
@@ -358,7 +524,7 @@ class Trader:
     
     async def close_all_positions(self):
         """Close all open positions."""
-        if self.paper_trading:
+        if self.paper_mode:
             # In paper trading, just mark trades as closed
             for trade_id, trade in list(self.active_trades.items()):
                 if trade['status'] == 'open':
