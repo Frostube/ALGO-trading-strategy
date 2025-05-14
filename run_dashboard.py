@@ -1,33 +1,63 @@
 #!/usr/bin/env python3
 """
-Run the Streamlit dashboard for the BTC/USDT scalping strategy.
+Dashboard runner that allows specifying a port number.
+Usage: python run_dashboard.py [port]
 """
-import os
 import sys
-import argparse
+import os
 import subprocess
+import socket
+import time
 
-# Add project root to path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+def is_port_in_use(port):
+    """Check if a port is already in use"""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        return s.connect_ex(('localhost', port)) == 0
+
+def find_available_port(start_port=8501, max_attempts=10):
+    """Find an available port starting from the specified port"""
+    port = start_port
+    attempts = 0
+    
+    while attempts < max_attempts:
+        if not is_port_in_use(port):
+            return port
+        port += 1
+        attempts += 1
+    
+    raise RuntimeError(f"Could not find an available port after {max_attempts} attempts")
 
 def main():
-    """Run the Streamlit dashboard."""
-    parser = argparse.ArgumentParser(description='Run the BTC/USDT scalping strategy dashboard')
-    parser.add_argument('--port', type=int, default=8501, help='Port for the Streamlit dashboard')
-    args = parser.parse_args()
+    """Main entry point for the script."""
+    # Default port
+    port = 8501
     
-    # Path to the Streamlit app
-    app_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'src', 'dashboard', 'app.py')
+    # Check if a port was specified
+    if len(sys.argv) > 1:
+        try:
+            port = int(sys.argv[1])
+        except ValueError:
+            print(f"Invalid port number: {sys.argv[1]}")
+            sys.exit(1)
     
-    # Run the Streamlit app using subprocess with python -m
-    cmd = [
-        'python', '-m', 'streamlit', 'run', app_path,
-        '--server.port', str(args.port),
-        '--browser.gatherUsageStats', 'false'
-    ]
+    # If the port is in use, find an available one
+    if is_port_in_use(port):
+        print(f"Port {port} is already in use.")
+        port = find_available_port(port)
+        print(f"Using port {port} instead.")
     
-    print(f"Starting Streamlit dashboard on port {args.port}...")
-    subprocess.run(cmd)
+    # Run the dashboard
+    print(f"Starting enhanced Streamlit dashboard on port {port}...")
+    
+    # Run the dashboard
+    cmd = ["python", "-m", "streamlit", "run", "src/dashboard/enhanced_dashboard.py", "--server.port", str(port)]
+    
+    try:
+        subprocess.run(cmd)
+    except KeyboardInterrupt:
+        print("\nDashboard stopped by user.")
+    except Exception as e:
+        print(f"Error running dashboard: {e}")
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main() 
