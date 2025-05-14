@@ -29,7 +29,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from src.data.data_loader import load_data
 from src.data.fetcher import fetch_ohlcv, DataFetcher
 from src.strategy.ema_crossover import EMACrossoverStrategy
-from src.backtest.backtest import Backtester
+from src.backtest.backtest import Backtester, MockAccount
 from src.utils.logger import logger
 from src.strategy.health_monitor import HealthMonitor
 from src.risk.portfolio_manager import PortfolioRiskManager
@@ -50,6 +50,8 @@ def parse_args():
                        help='Initial account balance (default: 10000)')
     parser.add_argument('--optimize', action='store_true',
                        help='Run parameter optimization before trading')
+    parser.add_argument('--use_cached_params', action='store_true',
+                       help='Use only cached parameters from file, skip optimization')
     parser.add_argument('--health-monitor', action='store_true',
                        help='Enable health monitoring')
     parser.add_argument('--risk-cap', type=float, default=0.015,
@@ -157,26 +159,6 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
     logger.info(f"Running backtest for {len(symbols)} symbols on {timeframe} timeframe "
                f"over {days} days with ${initial_balance} initial balance")
     
-    # Load data for the primary symbol (first in list)
-    primary_symbol = symbols[0]
-    df = load_data(symbol=primary_symbol, timeframe=timeframe, days=days)
-    
-    if df.empty:
-        logger.error(f"Failed to load data for {primary_symbol}")
-        return {}
-    
-    # Load data for all symbols
-    all_symbol_data = {primary_symbol: df}
-    
-    for symbol in symbols[1:]:
-        symbol_df = load_data(symbol=symbol, timeframe=timeframe, days=days)
-        
-        if symbol_df.empty:
-            logger.warning(f"Failed to load data for {symbol}, excluding from backtest")
-            continue
-            
-        all_symbol_data[symbol] = symbol_df
-    
     # Use provided parameters or load optimized parameters
     if params is None:
         params = {}
@@ -186,7 +168,7 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
             if symbol_params:
                 params[symbol] = symbol_params
     
-    # Create default parameters if none are available
+    # Default parameters if none available
     default_params = {
         'ema_fast': 10,
         'ema_slow': 40,
@@ -201,47 +183,80 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
         'use_volatility_sizing': True,
     }
     
-    # Initialize backtester
-    backtester = Backtester(
-        data=df,
-        initial_balance=initial_balance
-    )
+    # Run backtests for each symbol individually
+    all_results = {}
+    total_trades = 0
     
-    # Add all symbol data
-    backtester.all_symbol_data = all_symbol_data
+    for symbol in symbols:
+        logger.info(f"Running backtest for {symbol}...")
+        
+        # Load data for this symbol
+        df = load_data(symbol=symbol, timeframe=timeframe, days=days)
+        
+        if df.empty:
+            logger.error(f"Failed to load data for {symbol}, skipping")
+            continue
+            
+        logger.info(f"Loaded {len(df)} candles for {symbol}")
+        
+        # Get parameters for this symbol
+        symbol_params = params.get(symbol, default_params)
+        
+        # Create strategy with parameters
+        strategy = EMACrossoverStrategy(
+            symbol=symbol,
+            timeframe=timeframe,
+            account_balance=initial_balance,
+            auto_optimize=False,  # Don't auto-optimize when we already have parameters
+            fast_ema=symbol_params.get('ema_fast', 10),
+            slow_ema=symbol_params.get('ema_slow', 40),
+            trend_ema=symbol_params.get('ema_trend', 200),
+            atr_sl_multiplier=symbol_params.get('atr_sl_multiplier', 1.0),
+            risk_per_trade=symbol_params.get('risk_per_trade', 0.0075),
+            use_volatility_sizing=symbol_params.get('use_volatility_sizing', True),
+            vol_target_pct=symbol_params.get('vol_target_pct', 0.0075),
+            enable_pyramiding=symbol_params.get('enable_pyramiding', True),
+            max_pyramid_entries=symbol_params.get('max_pyramid_entries', 2)
+        )
+        
+        # Initialize backtester with data
+        backtester = Backtester(data=df, initial_balance=initial_balance)
+        
+        # Apply indicators
+        df_with_indicators = strategy.apply_indicators(df)
+        
+        # Create mock account
+        account = MockAccount(initial_balance=initial_balance, symbol=symbol)
+        strategy.set_account(account)
+        
+        # Run backtest
+        strategy_results = backtester._backtest_strategy(strategy, df_with_indicators)
+        
+        # Store results
+        all_results[symbol] = strategy_results
+        total_trades += strategy_results.get('total_trades', 0)
+        
+        # Print results for this symbol
+        logger.info(f"Backtest results for {symbol}:")
+        logger.info(f"  Return: {strategy_results.get('total_return', 0)*100:.2f}%")
+        logger.info(f"  Profit Factor: {strategy_results.get('profit_factor', 0):.2f}")
+        logger.info(f"  Win Rate: {strategy_results.get('win_rate', 0)*100:.2f}%")
+        logger.info(f"  Total Trades: {strategy_results.get('total_trades', 0)}")
     
-    # Configure backtester params
-    backtester.params = {
-        'symbols': symbols,
-        'params_by_symbol': params,
-        'default_params': default_params,
-        'enable_health_monitor': True,
-        'enable_portfolio_risk_manager': True,
-        'max_portfolio_risk': 0.015
+    # Add summary of all symbols
+    all_results['summary'] = {
+        'total_trades': total_trades,
+        'symbols_tested': len(all_results) - 1,  # Excluding summary
+        'per_symbol_avg_trades': total_trades / max(1, len(all_results) - 1)
     }
     
-    # Run backtest
-    results = backtester.run(symbols=symbols, strategies=['ema_crossover'])
-    
-    # Display results
-    if 'portfolio' in results:
-        portfolio = results['portfolio']
-        
-        logger.info("\n============================================================")
-        logger.info("PORTFOLIO PERFORMANCE RESULTS:")
-        logger.info(f"Total Return: {portfolio.get('total_return', 0) * 100:.2f}%")
-        logger.info(f"Annual Return: {portfolio.get('annual_return', 0) * 100:.2f}%")
-        logger.info(f"Sharpe Ratio: {portfolio.get('sharpe_ratio', 0):.2f}")
-        logger.info(f"Max Drawdown: {portfolio.get('max_drawdown', 0) * 100:.2f}%")
-        logger.info(f"Win Rate: {portfolio.get('win_rate', 0) * 100:.2f}%")
-        logger.info(f"Profit Factor: {portfolio.get('profit_factor', 0):.2f}")
-        logger.info(f"Total Trades: {portfolio.get('total_trades', 0)}")
-    
-    return results
+    return all_results
 
-def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015, enable_health_monitor=True):
+def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015, 
+                  enable_health_monitor=True, paper_mode=True, enable_notifications=False,
+                  params=None):
     """
-    Run live trading for the given symbols.
+    Run live or paper trading.
     
     Args:
         symbols: List of trading pair symbols
@@ -249,11 +264,14 @@ def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015, enable
         initial_balance: Initial account balance
         risk_cap: Maximum portfolio risk cap
         enable_health_monitor: Whether to enable health monitoring
+        paper_mode: True for paper trading, False for live trading
+        enable_notifications: Whether to enable notifications
+        params: Dictionary of parameters by symbol (optional)
     """
-    logger.info(f"Starting live trading for {len(symbols)} symbols on {timeframe} timeframe "
-               f"with ${initial_balance} initial balance")
+    # Import here to avoid circular imports
+    from src.execution.trader import Trader
     
-    # Initialize portfolio risk manager
+    # Set up portfolio risk manager
     risk_manager = PortfolioRiskManager(
         account_equity=initial_balance,
         max_portfolio_risk=risk_cap,
@@ -261,86 +279,151 @@ def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015, enable
         max_position_pct=0.20
     )
     
-    # Initialize health monitors for each symbol
-    health_monitors = {}
+    # Set up health monitor if enabled
+    health_monitor = None
     if enable_health_monitor:
-        for symbol in symbols:
-            health_monitors[symbol] = HealthMonitor(
-                strategy_name="ema_crossover",
-                symbol=symbol,
-                window_size=40,
-                min_profit_factor=1.0,
-                min_win_rate=0.35
-            )
+        health_monitor = HealthMonitor(
+            window_size=40,
+            min_trades=10,
+            degradation_threshold=0.3
+        )
     
     # Initialize strategies for each symbol
     strategies = {}
+    
     for symbol in symbols:
-        # Load optimized parameters
-        params = load_optimized_params(symbol, timeframe)
+        # Get parameters for this symbol
+        symbol_params = None
+        if params and symbol in params:
+            symbol_params = params[symbol]
+        else:
+            symbol_params = load_optimized_params(symbol, timeframe)
         
-        # Use default parameters if none are available
-        if params is None:
-            params = {
-                'ema_fast': 10,
-                'ema_slow': 40,
-                'ema_trend': 200,
-                'atr_sl_multiplier': 1.0,
-                'enable_pyramiding': True,
-                'max_pyramid_entries': 2,
-                'pyramid_threshold': 0.5,
-                'pyramid_position_scale': 0.5,
-                'risk_per_trade': 0.0075,
-                'vol_target_pct': 0.0075,
-                'use_volatility_sizing': True,
-            }
-        
-        # Initialize strategy
-        strategies[symbol] = EMACrossoverStrategy(
-            config=params,
+        # Create strategy instance
+        strategy = EMACrossoverStrategy(
             symbol=symbol,
             timeframe=timeframe,
-            account_balance=initial_balance
+            fast_ema=symbol_params.get('ema_fast', 10) if symbol_params else 10,
+            slow_ema=symbol_params.get('ema_slow', 40) if symbol_params else 40,
+            trend_ema=symbol_params.get('ema_trend', 200) if symbol_params else 200,
+            atr_sl_multiplier=symbol_params.get('atr_sl_multiplier', 1.0) if symbol_params else 1.0,
+            risk_per_trade=symbol_params.get('risk_per_trade', 0.0075) if symbol_params else 0.0075,
+            use_volatility_sizing=symbol_params.get('use_volatility_sizing', True) if symbol_params else True,
+            vol_target_pct=symbol_params.get('vol_target_pct', 0.0075) if symbol_params else 0.0075,
+            enable_pyramiding=symbol_params.get('enable_pyramiding', True) if symbol_params else True,
+            max_pyramid_entries=symbol_params.get('max_pyramid_entries', 2) if symbol_params else 2,
+            health_monitor=health_monitor
         )
         
-        logger.info(f"Initialized strategy for {symbol} with "
-                   f"EMA {params.get('ema_fast', 10)}/{params.get('ema_slow', 40)}/{params.get('ema_trend', 200)}")
+        strategies[symbol] = strategy
     
-    # Placeholder for live trading loop
-    # In a real implementation, this would connect to an exchange API
-    # and process real-time data
+    # Initialize trader
+    trader = Trader(
+        strategies=strategies,
+        risk_manager=risk_manager,
+        initial_balance=initial_balance,
+        paper_mode=paper_mode,
+        enable_notifications=enable_notifications
+    )
     
-    logger.info("Live trading not fully implemented in this example")
-    logger.info("To implement live trading, connect to exchange API and process real-time data")
+    # Run the trader
+    mode = "paper trading" if paper_mode else "LIVE TRADING"
+    logger.info(f"Starting {mode} for {len(symbols)} symbols: {', '.join(symbols)}")
+    trader.run()
 
 def main():
-    """Main function."""
+    """Main entry point for the script."""
     args = parse_args()
     
-    # Parse symbols list
-    symbols = args.symbols.split(',')
-    
+    # Set up logging
     if args.debug:
-        logger.setLevel('DEBUG')
+        logger.set_level('DEBUG')
     
-    # Create params directory if it doesn't exist
-    Path("params").mkdir(parents=True, exist_ok=True)
+    # Convert symbols string to list
+    if isinstance(args.symbols, str) and ',' in args.symbols:
+        symbols = [s.strip() for s in args.symbols.split(',')]
+    else:
+        symbols = [args.symbols]
     
-    # Run parameter optimization if requested
-    if args.optimize:
-        optimize_parameters(symbols, args.timeframe)
+    # Initialize parameters
+    params = {}
     
-    # Run in appropriate mode
+    # Skip optimization if using cached parameters only
+    if args.use_cached_params:
+        logger.info("Using cached parameters only (skipping optimization)")
+        for symbol in symbols:
+            symbol_params = load_optimized_params(symbol, args.timeframe)
+            if symbol_params:
+                params[symbol] = symbol_params
+            else:
+                logger.warning(f"No cached parameters found for {symbol}, will use defaults")
+    # Run optimization if requested
+    elif args.optimize:
+        logger.info("Running parameter optimization")
+        optim_params = optimize_parameters(symbols, args.timeframe)
+        
+        # Update params with optimized values
+        params.update(optim_params)
+    
+    # Load optimized parameters if not optimizing
+    else:
+        for symbol in symbols:
+            symbol_params = load_optimized_params(symbol, args.timeframe)
+            if symbol_params:
+                params[symbol] = symbol_params
+    
+    # Run in selected mode
     if args.mode == 'backtest':
-        run_backtest(symbols, args.timeframe, args.days, args.initial_balance)
-    elif args.mode in ['live', 'paper']:
-        run_live_trading(
-            symbols, 
-            args.timeframe, 
-            args.initial_balance,
-            risk_cap=args.risk_cap,
-            enable_health_monitor=args.health_monitor
-        )
-
+        results = run_backtest(symbols, args.timeframe, args.days, args.initial_balance, params)
+        
+        # Print summary results
+        if results:
+            logger.info("Backtest completed. Summary:")
+            
+            # Get the summary data
+            if 'summary' in results:
+                summary = results['summary']
+                logger.info(f"Total trades across all symbols: {summary.get('total_trades', 0)}")
+                logger.info(f"Symbols tested: {summary.get('symbols_tested', 0)}")
+                logger.info(f"Average trades per symbol: {summary.get('per_symbol_avg_trades', 0):.1f}")
+                
+                # Calculate overall metrics
+                total_return = 0
+                winning_symbols = 0
+                
+                for key, result in results.items():
+                    if key != 'summary':  # Skip the summary entry
+                        symbol_return = result.get('total_return', 0) * 100
+                        total_return += symbol_return
+                        if symbol_return > 0:
+                            winning_symbols += 1
+                
+                # Calculate average return across symbols
+                if summary.get('symbols_tested', 0) > 0:
+                    avg_return = total_return / summary.get('symbols_tested', 1)
+                    logger.info(f"Average return: {avg_return:.2f}%")
+                    logger.info(f"Winning symbols: {winning_symbols}/{summary.get('symbols_tested', 0)}")
+    
+    elif args.mode == 'paper':
+        run_live_trading(symbols, args.timeframe, args.initial_balance, 
+                        risk_cap=args.risk_cap,
+                        enable_health_monitor=args.health_monitor,
+                        paper_mode=True,
+                        enable_notifications=args.notifications,
+                        params=params)
+    
+    elif args.mode == 'live':
+        confirm = input("WARNING: You are about to start LIVE trading. Type 'CONFIRM' to continue: ")
+        
+        if confirm == 'CONFIRM':
+            run_live_trading(symbols, args.timeframe, args.initial_balance, 
+                            risk_cap=args.risk_cap,
+                            enable_health_monitor=args.health_monitor,
+                            paper_mode=False,
+                            enable_notifications=args.notifications,
+                            params=params)
+        else:
+            logger.warning("Live trading mode not confirmed. Exiting.")
+    
 if __name__ == "__main__":
     main() 

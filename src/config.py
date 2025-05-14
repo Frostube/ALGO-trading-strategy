@@ -32,6 +32,9 @@ VOLUME_PERIOD = 20  # Standard volume period
 VOLUME_THRESHOLD = 1.5  # Standard volume threshold
 ATR_PERIOD = 14  # Standard ATR period
 
+# Order execution settings
+ORDER_TIMEOUT_MS = 700  # Maker order timeout in milliseconds
+
 # Risk management settings (Optimized for 4h timeframe)
 RISK_PER_TRADE = 0.0075  # Changed from 0.01 to 0.75% of account per trade
 STOP_LOSS_PCT = 0.02  # Increased to 2% for longer timeframe (fallback if ATR not available)

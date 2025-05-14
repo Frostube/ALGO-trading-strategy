@@ -859,8 +859,14 @@ def run_backtest(days=30, initial_balance=10000, plot=True):
     # Clean up resources
     data_fetcher.close()
     
-    # Initialize backtester with both timeframes
-    backtester = Backtester(data=primary_data, initial_balance=initial_balance, higher_tf_data=higher_tf_data)
+    # Initialize backtester
+    backtester = Backtester(data=primary_data, initial_balance=initial_balance)
+    
+    # Store higher timeframe data in params if available
+    if higher_tf_data is not None:
+        if backtester.params is None:
+            backtester.params = {}
+        backtester.params['higher_tf_data'] = higher_tf_data
     
     # Run the backtest with train/test split
     results = backtester.run(train_test_split=BACKTEST_TRAIN_SPLIT)

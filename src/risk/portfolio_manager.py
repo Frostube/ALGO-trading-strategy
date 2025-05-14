@@ -346,6 +346,7 @@ class PortfolioRiskManager:
                           f"Would exceed portfolio risk limit of {self.max_portfolio_risk*100:.2f}%. "
                           f"Current risk: ${current_risk:.2f}, New position risk: ${new_position_risk:.2f}, "
                           f"Total would be: ${total_risk:.2f} > ${max_risk:.2f} max")
+            logger.info("Queued signal – risk cap hit")
         
         return can_open
     

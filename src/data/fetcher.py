@@ -18,6 +18,33 @@ from src.config import (
 from src.db.models import OHLCV, init_db
 from src.utils.logger import logger
 
+def fetch_ohlcv_full(ccxt_exch, symbol, tf, since_ms, limit=1000):
+    """
+    Fetch complete OHLCV data by making multiple API calls for pagination.
+    
+    Args:
+        ccxt_exch: Initialized CCXT exchange instance
+        symbol: Trading pair symbol
+        tf: Timeframe (e.g. '1h', '4h', '1d')
+        since_ms: Start timestamp in milliseconds
+        limit: Maximum number of candles per request (default 1000)
+        
+    Returns:
+        List of OHLCV candles
+    """
+    out = []
+    while True:
+        batch = ccxt_exch.fetch_ohlcv(symbol, tf, since=since_ms, limit=limit)
+        if not batch:
+            break
+        since_ms = batch[-1][0] + 1  # Next ms after last candle
+        out.extend(batch)
+        if len(batch) < limit:  # Final page
+            break
+        time.sleep(ccxt_exch.rateLimit / 1000)  # Respect rate limits
+    
+    return out
+
 def fetch_ohlcv(symbol="BTC/USDT", tf="1h", days=90, cache_dir="data"):
     """
     Fetch OHLCV data from CCXT exchange and cache to disk.
@@ -53,7 +80,9 @@ def fetch_ohlcv(symbol="BTC/USDT", tf="1h", days=90, cache_dir="data"):
         logger.info(f"Fetching {days} days of {tf} data for {symbol} from exchange")
         exch = ccxt.binance()
         since = exch.milliseconds() - days*24*60*60*1000
-        ohlcv = exch.fetch_ohlcv(symbol, timeframe=tf, since=since, limit=1000)
+        
+        # Use fetch_ohlcv_full to get all candles without the 1000 bar limit
+        ohlcv = fetch_ohlcv_full(exch, symbol, tf, since)
         
         # Convert to DataFrame
         df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])

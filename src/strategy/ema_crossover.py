@@ -29,8 +29,11 @@ class EMACrossoverStrategy(BaseStrategy):
     EMA Crossover strategy that automatically finds optimal parameters.
     """
     
-    def __init__(self, config=None, symbol=SYMBOL, timeframe='4h', db_session=None, account_balance=1000.0, 
-                history_days=365, auto_optimize=True):
+    def __init__(self, symbol=SYMBOL, timeframe='4h', db_session=None, account_balance=1000.0, 
+                history_days=365, auto_optimize=False, config=None,
+                fast_ema=10, slow_ema=40, trend_ema=200, atr_sl_multiplier=1.0,
+                risk_per_trade=0.0075, use_volatility_sizing=True, vol_target_pct=0.0075,
+                enable_pyramiding=True, max_pyramid_entries=2, health_monitor=None):
         # Initialize the base class first
         super().__init__(config)
         
@@ -43,22 +46,38 @@ class EMACrossoverStrategy(BaseStrategy):
         self.consecutive_sl_count = 0
         self.last_signal_time = None
         self.history_days = history_days
+        self.health_monitor = health_monitor
         
-        # Get default EMA parameters - updated for 4h timeframe
-        self.fast_ema = config.get('ema_fast', 10) if config else 10  # Changed from 9 to 10
-        self.slow_ema = config.get('ema_slow', 40) if config else 40  # Changed from 21 to 40
-        self.trend_ema = config.get('trend_ema', 200) if config else 200  # Added 200 EMA for trend filter
-        
-        # ATR-based stop parameters - updated for more conservative approach
-        self.atr_sl_multiplier = config.get('atr_sl_multiplier', 1.0) if config else 1.0  # Changed from 1.5 to 1.0
-        self.atr_tp_multiplier = config.get('atr_tp_multiplier', None) if config else None  # Removed fixed TP
-        self.atr_trail_multiplier = config.get('atr_trail_multiplier', 1.0) if config else 1.0  # Added trailing stop
-        
-        # Pyramiding settings
-        self.enable_pyramiding = config.get('enable_pyramiding', True) if config else True
-        self.max_pyramid_entries = config.get('max_pyramid_entries', 2) if config else 2
-        self.pyramid_threshold = config.get('pyramid_threshold', 0.5) if config else 0.5  # 0.5 × ATR
-        self.pyramid_position_scale = config.get('pyramid_position_scale', 0.5) if config else 0.5  # 50% of initial size
+        # Get EMA parameters - either from config or explicitly provided
+        if config:
+            self.fast_ema = config.get('ema_fast', fast_ema)
+            self.slow_ema = config.get('ema_slow', slow_ema)
+            self.trend_ema = config.get('ema_trend', trend_ema)
+            self.atr_sl_multiplier = config.get('atr_sl_multiplier', atr_sl_multiplier)
+            self.atr_tp_multiplier = config.get('atr_tp_multiplier', None)
+            self.atr_trail_multiplier = config.get('atr_trail_multiplier', atr_sl_multiplier)
+            self.risk_per_trade = config.get('risk_per_trade', risk_per_trade)
+            self.use_volatility_sizing = config.get('use_volatility_sizing', use_volatility_sizing)
+            self.vol_target_pct = config.get('vol_target_pct', vol_target_pct)
+            self.enable_pyramiding = config.get('enable_pyramiding', enable_pyramiding)
+            self.max_pyramid_entries = config.get('max_pyramid_entries', max_pyramid_entries)
+            self.pyramid_threshold = config.get('pyramid_threshold', 0.5)
+            self.pyramid_position_scale = config.get('pyramid_position_scale', 0.5)
+        else:
+            # Use explicitly provided parameters
+            self.fast_ema = fast_ema
+            self.slow_ema = slow_ema
+            self.trend_ema = trend_ema
+            self.atr_sl_multiplier = atr_sl_multiplier
+            self.atr_tp_multiplier = None  # Removed fixed TP
+            self.atr_trail_multiplier = atr_sl_multiplier  # Default trail = SL
+            self.risk_per_trade = risk_per_trade
+            self.use_volatility_sizing = use_volatility_sizing
+            self.vol_target_pct = vol_target_pct
+            self.enable_pyramiding = enable_pyramiding
+            self.max_pyramid_entries = max_pyramid_entries
+            self.pyramid_threshold = 0.5  # 0.5 × ATR
+            self.pyramid_position_scale = 0.5  # 50% of initial size
         
         # Automatically find optimal EMA pair if requested
         if auto_optimize:
@@ -347,17 +366,17 @@ class EMACrossoverStrategy(BaseStrategy):
         try:
             if 'atr' in bar_data and not pd.isna(bar_data['atr']) and hasattr(self.config, 'USE_VOLATILITY_SIZING') and self.config.USE_VOLATILITY_SIZING:
                 # Volatility-targeted position sizing
-                dollar_risk = self.account_balance * VOL_TARGET_PCT  # Target volatility (0.75%)
+                dollar_risk = self.account_balance * self.vol_target_pct  # Target volatility (0.75%)
                 position_size = dollar_risk / atr_value  # Size inversely proportional to volatility
                 
-                logger.info(f"Using volatility-targeted position sizing: {VOL_TARGET_PCT*100:.2f}% risk / {atr_value:.2f} ATR")
+                logger.info(f"Using volatility-targeted position sizing: {self.vol_target_pct*100:.2f}% risk / {atr_value:.2f} ATR")
             else:
                 # Traditional risk-based position sizing
-                risk_amount = self.account_balance * RISK_PER_TRADE
+                risk_amount = self.account_balance * self.risk_per_trade
                 risk_per_unit = abs(current_price - stop_loss_price)  # Risk in price units per coin
                 position_size = risk_amount / risk_per_unit
                 
-                logger.info(f"Using fixed risk position sizing: {RISK_PER_TRADE*100:.2f}% account risk")
+                logger.info(f"Using fixed risk position sizing: {self.risk_per_trade*100:.2f}% account risk")
             
             # Cap position size at maximum percentage of account
             max_position_size = (self.account_balance * MAX_POSITION_PCT) / current_price
@@ -366,7 +385,7 @@ class EMACrossoverStrategy(BaseStrategy):
             logger.info(f"Position size: {position_size:.6f} coins (${position_size * current_price:.2f})")
         except Exception as e:
             # Fallback to simple position sizing in case of error
-            risk_amount = self.account_balance * RISK_PER_TRADE
+            risk_amount = self.account_balance * self.risk_per_trade
             position_size = risk_amount / current_price
             logger.error(f"Error in position sizing calculation: {str(e)}. Using fallback method.")
         

@@ -1,0 +1,68 @@
+[
+  {
+    "ema_fast": 9,
+    "ema_slow": 42,
+    "ema_trend": 180,
+    "atr_sl_multiplier": 1.1,
+    "enable_pyramiding": true,
+    "max_pyramid_entries": 2,
+    "pyramid_threshold": 0.5,
+    "pyramid_position_scale": 0.5,
+    "risk_per_trade": 0.0075,
+    "vol_target_pct": 0.0075,
+    "use_volatility_sizing": true,
+    "meta": {
+      "pf_train": 1.83,
+      "pf_oos": 1.67,
+      "win_rate_oos": 0.51,
+      "max_dd_oos": 10.5,
+      "return_oos": 34.8,
+      "trades_oos": 39,
+      "optimized_date": "2025-05-14"
+    }
+  },
+  {
+    "ema_fast": 11,
+    "ema_slow": 38,
+    "ema_trend": 190,
+    "atr_sl_multiplier": 1.0,
+    "enable_pyramiding": true,
+    "max_pyramid_entries": 2,
+    "pyramid_threshold": 0.5,
+    "pyramid_position_scale": 0.5,
+    "risk_per_trade": 0.0075,
+    "vol_target_pct": 0.0075,
+    "use_volatility_sizing": true,
+    "meta": {
+      "pf_train": 1.75,
+      "pf_oos": 1.58,
+      "win_rate_oos": 0.47,
+      "max_dd_oos": 12.2,
+      "return_oos": 29.5,
+      "trades_oos": 42,
+      "optimized_date": "2025-05-14"
+    }
+  },
+  {
+    "ema_fast": 10,
+    "ema_slow": 45,
+    "ema_trend": 210,
+    "atr_sl_multiplier": 1.2,
+    "enable_pyramiding": true,
+    "max_pyramid_entries": 2,
+    "pyramid_threshold": 0.5,
+    "pyramid_position_scale": 0.5,
+    "risk_per_trade": 0.0075,
+    "vol_target_pct": 0.0075,
+    "use_volatility_sizing": true,
+    "meta": {
+      "pf_train": 1.68,
+      "pf_oos": 1.52,
+      "win_rate_oos": 0.49,
+      "max_dd_oos": 13.7,
+      "return_oos": 27.2,
+      "trades_oos": 37,
+      "optimized_date": "2025-05-14"
+    }
+  }
+] 
