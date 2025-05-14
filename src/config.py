@@ -8,8 +8,8 @@ load_dotenv()
 EXCHANGE = 'binance'
 SYMBOL = 'BTC/USDT'
 FUTURES = True
-TIMEFRAME = '1m'
-HIGHER_TIMEFRAME = '5m'  # For multi-timeframe analysis
+TIMEFRAME = '4h'  # Changed from 1m to 4h for longer-term trend following
+HIGHER_TIMEFRAME = '1d'  # Changed from 5m to 1d for multi-timeframe analysis
 
 # API credentials
 BINANCE_API_KEY = os.getenv('BINANCE_API_KEY')
@@ -21,44 +21,40 @@ SLACK_CHANNEL = os.getenv('SLACK_CHANNEL')
 # Database settings
 DATABASE_URL = 'sqlite:///data/trading_data.db'
 
-# Indicator parameters (Optimized)
-EMA_FAST = 9  # Optimized from 5 to 9
-EMA_SLOW = 16  # Optimized from 13 to 16
-EMA_TREND = 50  # Unchanged - for medium-term trend detection
-EMA_MICRO_TREND = 21  # Unchanged - for micro trend detection
-RSI_PERIOD = 7  # Optimized from 6 to 7
-RSI_LONG_THRESHOLD = 25  # Optimized from 30 to 25 (more aggressive entries)
-RSI_SHORT_THRESHOLD = 69  # Optimized from 70 to 69 (slightly more aggressive)
-VOLUME_PERIOD = 19  # Optimized from 15 to 19 (longer lookback)
-VOLUME_THRESHOLD = 1.37  # Optimized from 1.5 to 1.37 (slightly less restrictive)
-ATR_PERIOD = 10  # Unchanged
+# Indicator parameters (Optimized for 4h timeframe)
+EMA_FAST = 10  # Changed from 9 to 10 (more suitable for 4h timeframe)
+EMA_SLOW = 40  # Changed from 16 to 40 (more suitable for 4h timeframe)
+EMA_TREND = 200  # Added 200 EMA for trend filter
+RSI_PERIOD = 14  # Changed back to standard 14 (was 7)
+RSI_LONG_THRESHOLD = 30  # Changed from 25 to standard 30
+RSI_SHORT_THRESHOLD = 70  # Changed from 69 to standard 70
+VOLUME_PERIOD = 20  # Standard volume period
+VOLUME_THRESHOLD = 1.5  # Standard volume threshold
+ATR_PERIOD = 14  # Standard ATR period
 
-# HMA parameters (Optimized)
-HMA_FAST_PERIOD = 14  # Optimized value
-HMA_SLOW_PERIOD = 30  # Optimized value
+# Risk management settings (Optimized for 4h timeframe)
+RISK_PER_TRADE = 0.0075  # Changed from 0.01 to 0.75% of account per trade
+STOP_LOSS_PCT = 0.02  # Increased to 2% for longer timeframe (fallback if ATR not available)
+TAKE_PROFIT_PCT = None  # Removed fixed take profit - using trailing stops instead
+USE_ATR_STOPS = True  # Always use ATR-based stops
+ATR_SL_MULTIPLIER = 1.0  # Changed from 1.3 to 1.0 - using 1× ATR for stop loss
+ATR_TP_MULTIPLIER = None  # No fixed take profit multiplier - using trailing stops instead
 
-# Adaptive threshold settings
-USE_ADAPTIVE_THRESHOLDS = True  # Use percentile-based thresholds for RSI and volume
-ADAPTIVE_LOOKBACK = 100  # Number of periods for adaptive threshold calculation
+# Trailing stop settings
+USE_TRAILING_STOP = True  # Enable trailing stops
+TRAIL_ATR_MULTIPLIER = 1.0  # Use 1× ATR for trailing stops
+TRAIL_ACTIVATION_PCT = 0.005  # Activate trailing stop after 0.5% move in our favor
 
-# Trade frequency controls
-MIN_BARS_BETWEEN_TRADES = 2  # Decreased from 5 to allow more frequent trading
-MAX_TRADES_PER_HOUR = 6  # Increased from 3 to allow more trades
-MIN_CONSECUTIVE_BARS_AGREE = 1  # Decreased from 2 to enter trades faster
+# Volatility-based position sizing
+USE_VOLATILITY_SIZING = True  # New setting for volatility-targeted position sizing
+VOL_TARGET_PCT = 0.0075  # Target 0.75% volatility per trade
+VOL_LOOKBACK = 20  # Use 20 periods for volatility calculation
+MAX_POSITION_PCT = 0.20  # Cap position size at 20% of account
 
-# Risk management settings (Optimized)
-RISK_PER_TRADE = 0.01  # 1% of account per trade
-STOP_LOSS_PCT = 0.0035  # Increased from 0.00293 to 0.35%
-TAKE_PROFIT_PCT = 0.007  # Increased from 0.00608 to 0.7%
-USE_ATR_STOPS = True  # Use ATR-based stops instead of fixed percentage
-ATR_SL_MULTIPLIER = 1.3  # Increased from 1.12 to allow more room
-ATR_TP_MULTIPLIER = 3.0  # Decreased from 3.85 for faster profit taking
-
-# Two-leg stop settings
-USE_TWO_LEG_STOP = True  # Use two-leg stop strategy (initial SL then trailing)
-TRAIL_ACTIVATION_PCT = 0.001  # Decreased from 0.0015 to activate trailing sooner
-TRAIL_ATR_MULTIPLIER = 0.7  # Increased from 0.5 to give more room
-USE_SOFT_STOP = True  # Use "soft stop" alerts before hard stop
+# Trade frequency controls (adjusted for 4h timeframe)
+MIN_BARS_BETWEEN_TRADES = 2  # Allow trades every 2 bars (8 hours)
+MAX_TRADES_PER_DAY = 3  # Limit to 3 trades per day
+MIN_CONSECUTIVE_BARS_AGREE = 2  # Require 2 consecutive bars to agree on direction
 
 # Dynamic trailing stop settings
 TRAIL_VOLATILITY_ADJUSTMENT = True  # Adjust trailing stops based on volatility
@@ -66,19 +62,19 @@ TRAIL_PROFIT_LOCK_PCT = 0.5  # Lock in percentage of profit (50%)
 TRAIL_ACCELERATION = True  # Tighten trail as profit increases
 
 # Market regime settings
-VOLATILITY_WINDOW = 20  # Window for volatility calculation
-TREND_STRENGTH_THRESHOLD = 0.002  # Minimum trend strength to consider market trending
-HIGH_VOLATILITY_THRESHOLD = 1.2  # Relative multiple of avg volatility to consider "high"
-AVOID_HIGH_VOLATILITY = True  # Avoid trading in high volatility periods
-TREND_CONFIRMATION_WINDOW = 3  # Number of bars needed to confirm trend
+VOLATILITY_WINDOW = 50  # Longer window for volatility calculation (was 20)
+TREND_STRENGTH_THRESHOLD = 0.005  # Minimum trend strength to consider market trending
+HIGH_VOLATILITY_THRESHOLD = 1.5  # Relative multiple of avg volatility to consider "high"
+AVOID_HIGH_VOLATILITY = False  # Don't avoid high volatility (longer timeframe can handle it)
+TREND_CONFIRMATION_WINDOW = 5  # Number of bars needed to confirm trend (was 3)
 
-# Time-of-day trading filters - Make less restrictive
-USE_TIME_FILTERS = False  # Disabled time filters to generate more signals
-TRADING_HOURS_START = 0  # Allow trading at any hour
-TRADING_HOURS_END = 24  # Allow trading at any hour
-AVOID_MIDNIGHT_HOURS = False  # Allow trading during midnight hours
-HIGH_VOLATILITY_HOURS = [8, 9, 14, 15, 16, 20, 21]  # Hours with typically higher volatility (UTC)
-WEEKEND_TRADING = True  # Allow weekend trading
+# Time-of-day trading filters - Disabled for 4h timeframe
+USE_TIME_FILTERS = False
+TRADING_HOURS_START = 0
+TRADING_HOURS_END = 24
+AVOID_MIDNIGHT_HOURS = False
+HIGH_VOLATILITY_HOURS = []
+WEEKEND_TRADING = True
 
 # Backtesting settings
 SLIPPAGE = 0.0004  # 0.04%

@@ -36,16 +36,16 @@ class RSIMomentumStrategy(BaseStrategy):
         # Set strategy name explicitly
         self.name = "rsi_momentum"
         
-        # RSI parameters
-        self.rsi_period = config.get('rsi_period', 14)
-        self.rsi_long_threshold = config.get('rsi_long_threshold', 30)
-        self.rsi_short_threshold = config.get('rsi_short_threshold', 70)
-        self.rsi_exit_long_threshold = config.get('rsi_exit_long_threshold', 70)
-        self.rsi_exit_short_threshold = config.get('rsi_exit_short_threshold', 30)
+        # RSI parameters - more aggressive thresholds
+        self.rsi_period = config.get('rsi_period', 7)  # Shorter period, more signals (was 14)
+        self.rsi_long_threshold = config.get('rsi_long_threshold', 35)  # Higher threshold for longs (was 30)
+        self.rsi_short_threshold = config.get('rsi_short_threshold', 65)  # Lower threshold for shorts (was 70)
+        self.rsi_exit_long_threshold = config.get('rsi_exit_long_threshold', 65)  # Lower exit threshold (was 70)
+        self.rsi_exit_short_threshold = config.get('rsi_exit_short_threshold', 35)  # Higher exit threshold (was 30)
         
         # Trend filter parameters
-        self.use_trend_filter = config.get('use_trend_filter', False)
-        self.ema_trend_period = config.get('ema_trend_period', 100)
+        self.use_trend_filter = config.get('use_trend_filter', True)  # Enable by default
+        self.ema_trend_period = config.get('ema_trend_period', 50)  # Shorter trend filter (was 100)
         
         # Volume confirmation
         self.use_volume_filter = config.get('use_volume_filter', False)
@@ -163,35 +163,79 @@ class RSIMomentumStrategy(BaseStrategy):
         
         # Check for entry conditions (no position or pyramiding enabled)
         if not has_position or (self.use_pyramiding and self.current_pyramid_entries < self.max_pyramid_entries):
-            # Long entry: RSI crosses above oversold threshold
+            # Long entry signals - More entry conditions added
+            
+            # 1. Classic RSI oversold cross
             if previous_rsi < long_threshold and current_rsi >= long_threshold:
-                # Check trend filter if enabled
-                trend_ok = True
-                if self.use_trend_filter:
-                    trend_ok = current['close'] > current['ema_trend']
+                signal = "buy"
+            
+            # 2. RSI bullish divergence: price makes lower low but RSI makes higher low
+            elif len(data) >= 4:
+                # Look at last few candles for divergence
+                candle_3 = data.iloc[-4]
+                candle_2 = data.iloc[-3]
+                candle_1 = previous
+                candle_0 = current
                 
-                # Check volume filter if enabled
-                volume_ok = True
-                if self.use_volume_filter:
-                    volume_ok = current['volume_ratio'] > self.volume_threshold
-                
-                if trend_ok and volume_ok:
-                    signal = "buy"
+                # Check for bullish divergence
+                if (candle_2['low'] > candle_3['low'] and  # Lower low in price
+                    candle_0['low'] < candle_2['low'] and
+                    candle_0['rsi'] > candle_2['rsi'] and  # Higher low in RSI
+                    current_rsi < 45):  # RSI still relatively low
                     
-            # Short entry: RSI crosses below overbought threshold
-            elif previous_rsi > short_threshold and current_rsi <= short_threshold:
-                # Check trend filter if enabled
-                trend_ok = True
-                if self.use_trend_filter:
-                    trend_ok = current['close'] < current['ema_trend']
+                    # Check trend filter if enabled
+                    trend_ok = True
+                    if self.use_trend_filter:
+                        trend_ok = current['close'] > current['ema_trend']
+                        
+                    if trend_ok:
+                        signal = "buy"
+            
+            # 3. RSI momentum shift (RSI bouncing off extreme lows)
+            elif current_rsi < 30 and current_rsi > previous_rsi + 5:  # Sharp upward momentum from extreme lows
+                signal = "buy"
+                    
+            # Short entry signals
+            
+            # 1. Classic RSI overbought cross
+            if previous_rsi > short_threshold and current_rsi <= short_threshold:
+                signal = "sell"
                 
-                # Check volume filter if enabled
+            # 2. RSI bearish divergence: price makes higher high but RSI makes lower high
+            elif len(data) >= 4:
+                # Look at last few candles for divergence
+                candle_3 = data.iloc[-4]
+                candle_2 = data.iloc[-3]
+                candle_1 = previous
+                candle_0 = current
+                
+                # Check for bearish divergence
+                if (candle_2['high'] < candle_3['high'] and  # Higher high in price
+                    candle_0['high'] > candle_2['high'] and
+                    candle_0['rsi'] < candle_2['rsi'] and  # Lower high in RSI
+                    current_rsi > 55):  # RSI still relatively high
+                    
+                    # Check trend filter if enabled
+                    trend_ok = True
+                    if self.use_trend_filter:
+                        trend_ok = current['close'] < current['ema_trend']
+                        
+                    if trend_ok:
+                        signal = "sell"
+            
+            # 3. RSI momentum shift (RSI dropping from extreme highs)
+            elif current_rsi > 70 and current_rsi < previous_rsi - 5:  # Sharp downward momentum from extreme highs
+                signal = "sell"
+                
+            # Apply filters to signal if we have one
+            if signal:
+                # Volume filter - only apply if signal exists
                 volume_ok = True
                 if self.use_volume_filter:
                     volume_ok = current['volume_ratio'] > self.volume_threshold
                 
-                if trend_ok and volume_ok:
-                    signal = "sell"
+                if not volume_ok:
+                    signal = ""  # Cancel signal if volume is insufficient
         
         # Check exit conditions if we have a position
         elif has_position:

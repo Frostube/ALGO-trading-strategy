@@ -4,13 +4,28 @@ import operator
 
 from src.config import (
     EMA_FAST, EMA_SLOW, RSI_PERIOD, VOLUME_PERIOD, VOLUME_THRESHOLD,
-    EMA_TREND, EMA_MICRO_TREND, ATR_PERIOD, USE_ATR_STOPS, 
-    USE_ADAPTIVE_THRESHOLDS, ADAPTIVE_LOOKBACK, MIN_BARS_BETWEEN_TRADES,
-    USE_TIME_FILTERS, TRADING_HOURS_START, TRADING_HOURS_END,
-    AVOID_MIDNIGHT_HOURS, HIGH_VOLATILITY_HOURS, WEEKEND_TRADING,
-    USE_ML_FILTER, ML_PROBABILITY_THRESHOLD
+    EMA_TREND, ATR_PERIOD, USE_ATR_STOPS, 
+    MIN_BARS_BETWEEN_TRADES, USE_TIME_FILTERS, TRADING_HOURS_START, 
+    TRADING_HOURS_END, AVOID_MIDNIGHT_HOURS, WEEKEND_TRADING
 )
 from src.utils.logger import logger
+
+# Check for optional config parameters
+try:
+    from src.config import USE_ADAPTIVE_THRESHOLDS, ADAPTIVE_LOOKBACK, HIGH_VOLATILITY_HOURS
+except ImportError:
+    USE_ADAPTIVE_THRESHOLDS = False
+    ADAPTIVE_LOOKBACK = 100
+    HIGH_VOLATILITY_HOURS = []
+
+try:
+    from src.config import USE_ML_FILTER, ML_PROBABILITY_THRESHOLD
+except ImportError:
+    USE_ML_FILTER = False
+    ML_PROBABILITY_THRESHOLD = 0.7
+
+# Define micro trend period
+MICRO_TREND_PERIOD = 50  # Default value if not in config
 
 # Import ML filter if enabled
 if USE_ML_FILTER:
@@ -50,7 +65,7 @@ def apply_indicators(df):
     
     try:
         # Apply indicators
-        df = calculate_ema(df, EMA_FAST, EMA_SLOW, EMA_TREND, EMA_MICRO_TREND)
+        df = calculate_ema(df, EMA_FAST, EMA_SLOW, EMA_TREND, MICRO_TREND_PERIOD)
         df = calculate_rsi(df, RSI_PERIOD)
         df = calculate_volume_ma(df, VOLUME_PERIOD)
         df = calculate_atr(df, ATR_PERIOD)
@@ -202,7 +217,8 @@ def calculate_rsi(df, period=2):
     df['avg_loss'] = df['loss'].rolling(window=period).mean()
     
     # Calculate relative strength
-    df['rs'] = df['avg_gain'] / df['avg_loss']
+    # Handle division by zero
+    df['rs'] = df['avg_gain'] / df['avg_loss'].replace(0, 0.001)
     
     # Calculate RSI
     df['rsi'] = 100 - (100 / (1 + df['rs']))
@@ -654,17 +670,41 @@ def _get_scalar_value(value):
 
 def _safe_compare(value, threshold, comparison_func):
     """
-    Safely compare a value with a threshold using the provided comparison function.
+    Safely compare two values, handling different types and NaN values.
     
     Args:
-        value: The value to compare (could be Series, scalar, etc.)
-        threshold: The threshold to compare against
-        comparison_func: Function to use for comparison (e.g., operator.gt)
+        value: First value
+        threshold: Second value
+        comparison_func: Comparison function (e.g., operator.gt)
         
     Returns:
-        bool: Result of the comparison
+        bool: Result of comparison, or False if comparison fails
     """
-    return comparison_func(_get_scalar_value(value), threshold)
+    # Convert both to primitive Python types
+    try:
+        if hasattr(value, '__iter__') and not isinstance(value, str):
+            # Handle Series/lists/arrays - use the last value
+            val = _get_scalar_value(value)
+        else:
+            val = _get_scalar_value(value)
+            
+        if hasattr(threshold, '__iter__') and not isinstance(threshold, str):
+            # Handle Series/lists/arrays - use the last value
+            thresh = _get_scalar_value(threshold)
+        else:
+            thresh = _get_scalar_value(threshold)
+            
+        # Handle None/NaN values
+        if val is None or thresh is None:
+            return False
+        if pd.isna(val) or pd.isna(thresh):
+            return False
+            
+        # Perform comparison
+        return comparison_func(val, thresh)
+    except Exception as e:
+        logger.debug(f"Comparison error: {str(e)}")
+        return False
 
 def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BETWEEN_TRADES):
     """
@@ -708,7 +748,6 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
         'hma_trend': _get_scalar_value(row.get('hma_trend', 0)),
         'donchian_breakout': _get_scalar_value(row.get('donchian_breakout', 0)),
         'market_trend': _get_scalar_value(row.get('market_trend', 0)),
-        'micro_trend': _get_scalar_value(row.get('ema_micro_direction', 0)),
         'rsi': _get_scalar_value(row['rsi']),
         'volume_spike': row['volume_spike'] if not USE_ADAPTIVE_THRESHOLDS else row['adaptive_volume_spike'],
         'atr': _get_scalar_value(row.get('atr', None)),

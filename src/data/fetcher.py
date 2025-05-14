@@ -5,6 +5,8 @@ import ccxt
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import pathlib
+import time
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 from collections import defaultdict
@@ -16,15 +18,85 @@ from src.config import (
 from src.db.models import OHLCV, init_db
 from src.utils.logger import logger
 
+def fetch_ohlcv(symbol="BTC/USDT", tf="1h", days=90, cache_dir="data"):
+    """
+    Fetch OHLCV data from CCXT exchange and cache to disk.
+    Will use cached data if available and fresh (< 1 hour old).
+    
+    Args:
+        symbol: Trading pair symbol
+        tf: Timeframe (e.g. '1h', '4h', '1d')
+        days: Number of days of history to fetch
+        cache_dir: Directory to cache data
+        
+    Returns:
+        DataFrame with OHLCV data
+    """
+    # Create cache filename
+    cache_f = pathlib.Path(cache_dir) / f"{symbol.replace('/','_')}_{tf}_{days}d.json"
+    
+    # Use cached data if recent enough
+    if cache_f.exists() and (time.time() - cache_f.stat().st_mtime) < 3600:
+        logger.info(f"Loading cached data for {symbol} ({tf}) from {cache_f}")
+        df = pd.read_json(cache_f)
+        # Convert timestamp to datetime
+        if 'ts' in df.columns:
+            df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+            df.set_index("ts", inplace=True)
+        elif 'timestamp' in df.columns:
+            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+            df.set_index("timestamp", inplace=True)
+        return df
+
+    # Fetch from exchange
+    try:
+        logger.info(f"Fetching {days} days of {tf} data for {symbol} from exchange")
+        exch = ccxt.binance()
+        since = exch.milliseconds() - days*24*60*60*1000
+        ohlcv = exch.fetch_ohlcv(symbol, timeframe=tf, since=since, limit=1000)
+        
+        # Convert to DataFrame
+        df = pd.DataFrame(ohlcv, columns=["timestamp", "open", "high", "low", "close", "volume"])
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+        df.set_index("timestamp", inplace=True)
+        
+        # Convert types
+        for col in ['open', 'high', 'low', 'close', 'volume']:
+            df[col] = pd.to_numeric(df[col])
+            
+        # Save cache
+        cache_f.parent.mkdir(parents=True, exist_ok=True)
+        df.reset_index().to_json(cache_f, orient="records")
+        
+        logger.info(f"Fetched and cached {len(df)} candles for {symbol} ({tf})")
+        return df
+    except Exception as e:
+        logger.error(f"Error fetching OHLCV via CCXT: {e}")
+        # If the cache exists but is old, use it as a fallback
+        if cache_f.exists():
+            logger.warning(f"Using stale cache for {symbol} ({tf})")
+            df = pd.read_json(cache_f)
+            if 'ts' in df.columns:
+                df["ts"] = pd.to_datetime(df["ts"], unit="ms")
+                df.set_index("ts", inplace=True)
+            elif 'timestamp' in df.columns:
+                df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+                df.set_index("timestamp", inplace=True)
+            return df
+        # Last resort: return empty DataFrame
+        logger.error(f"Failed to fetch data for {symbol} ({tf})")
+        return pd.DataFrame()
+
 class DataFetcher:
     """Fetch and manage historical and real-time market data."""
     
-    def __init__(self, use_testnet=False):
+    def __init__(self, use_testnet=False, use_mock=False):
         # Initialize exchange
         self.exchange_id = EXCHANGE
         self.symbol = SYMBOL
         self.timeframe = TIMEFRAME
         self.use_testnet = use_testnet
+        self.use_mock = use_mock
         
         # Set up REST exchange for historical data
         exchange_config = {
@@ -81,99 +153,44 @@ class DataFetcher:
                 'private': 'https://testnet.binance.vision/api'
             }
         
-    def fetch_historical_data(self, days=None, timeframe=None):
+    def fetch_historical_data(self, symbol=SYMBOL, timeframe=TIMEFRAME, days=90):
         """
-        Fetch historical data for the configured symbol and timeframe.
+        Fetch historical OHLCV data. Prioritizes real data over mock data.
         
         Args:
+            symbol: Trading pair symbol
+            timeframe: Candlestick timeframe
             days: Number of days of historical data to fetch
-            timeframe: Specific timeframe to fetch (default: use instance timeframe)
-        
+            
         Returns:
             DataFrame with historical OHLCV data
         """
-        days = days or HISTORICAL_DATA_DAYS
-        tf = timeframe or self.timeframe
-        
-        logger.info(f"Fetching {days} days of historical data for {self.symbol} ({tf})")
-        
-        # Use different approach for testnet
-        if self.use_testnet:
-            try:
-                # For testnet, try to use a simple endpoint that's more likely to work
-                logger.info("Attempting to fetch data from Binance Testnet...")
-                batch = self.rest_exchange.fetch_ohlcv(
-                    symbol=self.symbol,
-                    timeframe=tf,
-                    limit=500  # Request a reasonable amount
-                )
-                
-                if batch and len(batch) > 0:
-                    ohlcv_data = batch
-                    logger.info(f"Successfully fetched {len(batch)} candles from testnet")
-                else:
-                    logger.warning(f"No data available on testnet for {self.symbol} with {tf}")
-                    ohlcv_data = self._generate_mock_data(days, tf)
-            except Exception as e:
-                logger.warning(f"Testnet fetch error: {str(e)}")
-                # Generate mock data as a fallback
-                logger.info("Generating mock data for testing purposes")
-                ohlcv_data = self._generate_mock_data(days, tf)
+        if isinstance(symbol, str) and '/' in symbol:
+            formatted_symbol = symbol  # Already in CCXT format (BTC/USDT)
         else:
-            # Standard approach for production
+            # Convert from Binance format (BTCUSDT) to CCXT format (BTC/USDT)
+            if symbol.endswith('USDT'):
+                base = symbol[:-4]
+                formatted_symbol = f"{base}/USDT"
+            else:
+                formatted_symbol = symbol  # Use as-is if unknown format
+                
+        logger.info(f"Fetching {days} days of historical data for {formatted_symbol} ({timeframe})")
+        
+        if not self.use_mock:
             try:
-                # Calculate start time
-                since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
-                
-                # Fetch OHLCV data
-                ohlcv_data = []
-                
-                # Binance API has a limit on number of candles per request, so fetch in batches
-                current_since = since
-                while True:
-                    logger.debug(f"Fetching batch from {datetime.fromtimestamp(current_since/1000)}")
-                    batch = self.rest_exchange.fetch_ohlcv(
-                        symbol=self.symbol,
-                        timeframe=tf,
-                        since=current_since,
-                        limit=1000  # Binance limit
-                    )
-                    
-                    if not batch:
-                        break
-                    
-                    ohlcv_data.extend(batch)
-                    
-                    # If we got less than 1000 candles, we've reached the end
-                    if len(batch) < 1000:
-                        break
-                    
-                    # Update since for next batch (last candle timestamp + 1 minute)
-                    current_since = batch[-1][0] + 60000
-                    
-                    # Avoid rate limits
-                    self.rest_exchange.sleep(1)
-            
+                # Try to fetch real data via CCXT
+                df = fetch_ohlcv(symbol=formatted_symbol, tf=timeframe, days=days)
+                if not df.empty:
+                    logger.info(f"Successfully fetched {len(df)} historical candles for {formatted_symbol}")
+                    return df
             except Exception as e:
-                logger.error(f"Error fetching historical data for {tf}: {str(e)}")
-                return pd.DataFrame()  # Return empty DataFrame
-        
-        # Check if we got any data
-        if not ohlcv_data:
-            logger.error(f"No data retrieved for {self.symbol} with timeframe {tf}")
-            return pd.DataFrame()  # Return empty DataFrame
-        
-        # Store the data in database with timeframe
-        try:
-            self._store_ohlcv_data(ohlcv_data, tf)
-        except Exception as e:
-            logger.warning(f"Could not store data in database: {str(e)}")
-        
-        # Convert to DataFrame and cache for this timeframe
-        self.data_cache[tf] = self._convert_to_dataframe(ohlcv_data)
-        
-        logger.info(f"Fetched {len(ohlcv_data)} historical candles for timeframe {tf}")
-        return self.data_cache[tf]
+                logger.warning(f"Error fetching real data: {e}")
+                logger.warning("Falling back to mock data")
+                
+        # If we get here, either use_mock is True or we failed to get real data
+        logger.info("Generating mock data for testing purposes")
+        return self.generate_mock_data(days=days, timeframe=timeframe)
     
     def _store_ohlcv_data(self, ohlcv_data, timeframe):
         """Store OHLCV data in the database."""
@@ -327,55 +344,123 @@ class DataFetcher:
         if hasattr(self, 'ws_exchange'):
             await self.ws_exchange.close()
     
-    def _generate_mock_data(self, days, timeframe):
-        """Generate mock OHLCV data for testing when testnet fails."""
-        # Current time
-        now = datetime.now()
+    def generate_mock_data(self, days=30, timeframe='1h'):
+        """
+        Generate mock price data for testing purposes.
+        Only use for unit testing or when real data is unavailable.
+        
+        Args:
+            days: Number of days to generate
+            timeframe: Timeframe to generate
+            
+        Returns:
+            DataFrame with mock OHLCV data
+        """
+        logger.warning("Using mock data - results will not reflect real market behavior!")
+        
+        # Set more reasonable volatility for testing
+        base_volatility = 0.008  # 0.8% volatility per candle (more realistic)
+        volume_volatility = 0.3
         
         # Calculate number of candles based on timeframe
-        minutes_per_candle = int(timeframe[:-1]) if timeframe.endswith('m') else \
-                            int(timeframe[:-1]) * 60 if timeframe.endswith('h') else \
-                            int(timeframe[:-1]) * 60 * 24  # days
+        candles_per_day = {
+            '1m': 1440,
+            '3m': 480,
+            '5m': 288,
+            '15m': 96,
+            '30m': 48,
+            '1h': 24,
+            '2h': 12,
+            '4h': 6,
+            '6h': 4,
+            '8h': 3,
+            '12h': 2,
+            '1d': 1
+        }
         
-        total_minutes = days * 24 * 60
-        num_candles = total_minutes // minutes_per_candle
+        candles_per_day_val = candles_per_day.get(timeframe, 24)
+        num_candles = days * candles_per_day_val
         
-        # Limit to a reasonable number
-        num_candles = min(num_candles, 5000)
+        # Generate timestamps
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=days)
+        timestamps = pd.date_range(start=start_time, end=end_time, periods=num_candles)
         
-        # Generate mock data
-        mock_data = []
-        base_price = 50000  # Starting BTC price
-        volume = 10  # Base volume
+        # Generate random price data with more realistic trends
+        close_prices = [20000]  # Start with $20,000 per BTC
+        
+        # Create more realistic trends with periods of consistent direction
+        trend_direction = 1  # 1 for up, -1 for down
+        trend_length = 0
+        max_trend_length = 48  # Maximum length of a trend (2 days for hourly)
+        
+        for i in range(1, num_candles):
+            # Determine if we should switch trend direction
+            if trend_length >= max_trend_length or np.random.random() < 0.05:  # 5% chance to switch trend
+                trend_direction = -trend_direction
+                trend_length = 0
+                # Moderate trend reversal (not too extreme)
+                price_change = close_prices[-1] * np.random.normal(trend_direction * base_volatility * 1.5, base_volatility * 0.5)
+            else:
+                # Regular trend continuation
+                price_change = close_prices[-1] * np.random.normal(trend_direction * base_volatility * 0.5, base_volatility)
+                trend_length += 1
+            
+            # Add occasional larger moves (but not unrealistic ones)
+            if np.random.random() < 0.02:  # 2% chance of a larger move
+                price_change *= np.random.uniform(1.5, 2.0)
+            
+            new_price = close_prices[-1] + price_change
+            
+            # Ensure price stays positive and reasonable
+            new_price = max(new_price, close_prices[-1] * 0.95)  # Don't drop more than 5% in a single candle
+            new_price = min(new_price, close_prices[-1] * 1.05)  # Don't rise more than 5% in a single candle
+            
+            close_prices.append(new_price)
+        
+        # Generate OHLC data from close prices with realistic spread
+        open_prices = []
+        high_prices = []
+        low_prices = []
+        volumes = []
         
         for i in range(num_candles):
-            # Calculate timestamp for this candle
-            timestamp = int((now - timedelta(minutes=minutes_per_candle * (num_candles - i))).timestamp() * 1000)
+            if i == 0:
+                open_price = close_prices[i] * (1 - np.random.random() * 0.005)  # 0.5% max gap
+            else:
+                open_price = close_prices[i-1] * (1 + np.random.normal(0, base_volatility * 0.3))
             
-            # Add some randomness to price movements
-            price_change = (np.random.random() - 0.5) * 100
-            base_price += price_change
+            # Generate high and low with more realistic range
+            price_range = close_prices[i] * base_volatility * 1.5  # Typical range is 1-2% of price
+            high_price = max(open_price, close_prices[i]) + abs(np.random.normal(0, price_range * 0.3))
+            low_price = min(open_price, close_prices[i]) - abs(np.random.normal(0, price_range * 0.3))
             
-            # Generate OHLCV values with some randomness
-            open_price = base_price
-            close_price = base_price + (np.random.random() - 0.5) * 50
-            high_price = max(open_price, close_price) + np.random.random() * 30
-            low_price = min(open_price, close_price) - np.random.random() * 30
+            # Ensure high is always highest and low is always lowest
+            high_price = max(high_price, open_price, close_prices[i])
+            low_price = min(low_price, open_price, close_prices[i])
             
-            # Random volume with occasional spikes
-            candle_volume = volume * (1 + np.random.random())
-            if np.random.random() < 0.1:  # 10% chance of volume spike
-                candle_volume *= 3
+            # Generate volume with correlation to price volatility
+            price_move = abs(close_prices[i] - open_price) / open_price
+            volume_base = 50 + 500 * (price_move / base_volatility)  # Higher volume on larger moves
+            volume = volume_base * np.random.lognormal(0, volume_volatility)
             
-            # Add the candle to our mock data
-            mock_data.append([
-                timestamp,
-                float(open_price),
-                float(high_price),
-                float(low_price),
-                float(close_price),
-                float(candle_volume)
-            ])
+            open_prices.append(open_price)
+            high_prices.append(high_price)
+            low_prices.append(low_price)
+            volumes.append(volume)
         
-        logger.info(f"Generated {len(mock_data)} mock candles for testing")
-        return mock_data 
+        # Create DataFrame from generated data
+        mock_df = pd.DataFrame({
+            'timestamp': timestamps,
+            'open': open_prices,
+            'high': high_prices,
+            'low': low_prices,
+            'close': close_prices,
+            'volume': volumes
+        })
+        
+        mock_df['timestamp'] = pd.to_datetime(mock_df['timestamp'])
+        mock_df.set_index('timestamp', inplace=True)
+        
+        logger.info(f"Generated {len(mock_df)} mock candles with realistic parameters")
+        return mock_df 

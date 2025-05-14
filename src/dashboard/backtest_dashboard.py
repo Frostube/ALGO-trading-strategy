@@ -191,11 +191,19 @@ def display_backtest_results(results, is_split, backtester):
         # Create tabs for Train/Test results
         train_tab, test_tab, combined_tab = st.tabs(["Training Set", "Testing Set", "Combined Analysis"])
         
+        # Convert equity_curve to list if it's not already
+        equity_curve = backtester.equity_curve
+        if not isinstance(equity_curve, list):
+            equity_curve = list(equity_curve)
+        
+        # Calculate the midpoint index for splitting
+        mid_point = len(equity_curve) // 2
+        
         with train_tab:
-            display_result_set(results["train"], "Training Set", backtester.equity_curve[:len(backtester.equity_curve)//2])
+            display_result_set(results["train"], "Training Set", equity_curve[:mid_point])
         
         with test_tab:
-            display_result_set(results["test"], "Testing Set", backtester.equity_curve[len(backtester.equity_curve)//2:])
+            display_result_set(results["test"], "Testing Set", equity_curve[mid_point:])
         
         with combined_tab:
             display_combined_results(results)

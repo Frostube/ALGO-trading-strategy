@@ -1,0 +1,128 @@
+{
+  "timestamp": "20250514_011031",
+  "portfolio": {
+    "total_return": 3.4231850044358394,
+    "annual_return": 414.7330876381893,
+    "monthly_return": 0.6528542134844755,
+    "sharpe_ratio": 0,
+    "sortino_ratio": 0,
+    "calmar_ratio": 4147330.876381893,
+    "max_drawdown": 0,
+    "win_rate": 0,
+    "days_in_test": 90,
+    "drawdown_stats": {
+      "max_drawdown": 0,
+      "avg_drawdown": 0,
+      "top_drawdowns": [],
+      "total_drawdowns": 0
+    }
+  },
+  "strategies": {
+    "EMACrossoverStrategy": {
+      "return": [
+        0.0,
+        0.09887157972073468,
+        -0.05853374248301302,
+        0.10579625110895985
+      ],
+      "sharpe": [
+        0.0,
+        1.4120177469572512,
+        -1.1108990308857394,
+        1.2799555113350132
+      ],
+      "trades": 27,
+      "symbols": [
+        "BTCUSDT",
+        "ETHUSDT",
+        "BNBUSDT",
+        "SOLUSDT"
+      ],
+      "avg_return": 0.03653352208667038,
+      "avg_sharpe": 0.39526855685163126
+    }
+  },
+  "symbols": {
+    "BTCUSDT": {
+      "return": [
+        0.0
+      ],
+      "sharpe": [
+        0.0
+      ],
+      "trades": 2,
+      "strategies": [
+        "EMACrossoverStrategy"
+      ],
+      "avg_return": 0.0,
+      "avg_sharpe": 0.0
+    },
+    "ETHUSDT": {
+      "return": [
+        0.09887157972073468
+      ],
+      "sharpe": [
+        1.4120177469572512
+      ],
+      "trades": 5,
+      "strategies": [
+        "EMACrossoverStrategy"
+      ],
+      "avg_return": 0.09887157972073468,
+      "avg_sharpe": 1.4120177469572512
+    },
+    "BNBUSDT": {
+      "return": [
+        -0.05853374248301302
+      ],
+      "sharpe": [
+        -1.1108990308857394
+      ],
+      "trades": 8,
+      "strategies": [
+        "EMACrossoverStrategy"
+      ],
+      "avg_return": -0.05853374248301302,
+      "avg_sharpe": -1.1108990308857394
+    },
+    "SOLUSDT": {
+      "return": [
+        0.10579625110895985
+      ],
+      "sharpe": [
+        1.2799555113350132
+      ],
+      "trades": 12,
+      "strategies": [
+        "EMACrossoverStrategy"
+      ],
+      "avg_return": 0.10579625110895985,
+      "avg_sharpe": 1.2799555113350132
+    }
+  },
+  "config": {
+    "ema_fast": 8,
+    "ema_slow": 21,
+    "ema_trend": 50,
+    "rsi_period": 9,
+    "rsi_long_threshold": 40,
+    "rsi_short_threshold": 60,
+    "atr_period": 10,
+    "atr_sl_multiplier": 1.5,
+    "atr_tp_multiplier": 3.5,
+    "vol_target_pct": 0.2,
+    "max_allocation": 0.4,
+    "ensemble_method": "Sharpe-Weighted",
+    "pos_sizing_method": "Volatility Targeting",
+    "risk_per_trade": 0.03,
+    "enable_pyramiding": true,
+    "max_pyramid_units": 4,
+    "exit_strategy": "ATR-Based Trailing Stop",
+    "trail_activation_pct": 0.005,
+    "trail_atr_multiplier": 1.2,
+    "regime_lookback": 20,
+    "vol_ranging_threshold": 0.02,
+    "vol_trending_threshold": 0.06
+  },
+  "allocations": {}
+}
