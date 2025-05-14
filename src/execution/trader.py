@@ -63,8 +63,19 @@ class Trader:
             strategy = self.strategies[symbol]
             
             # Strategy specific initialization
-            if hasattr(strategy, 'initialize'):
-                strategy.initialize()
+            if hasattr(strategy, 'initialize') and callable(getattr(strategy, 'initialize')):
+                try:
+                    # Check if initialize expects an account parameter
+                    import inspect
+                    sig = inspect.signature(strategy.initialize)
+                    if 'account' in sig.parameters:
+                        # Create a mock account
+                        mock_account = {'balance': self.initial_balance}
+                        strategy.initialize(mock_account)
+                    else:
+                        strategy.initialize()
+                except Exception as e:
+                    logger.warning(f"Error initializing strategy for {symbol}: {str(e)}")
         
         logger.info("Trading engine started")
         
