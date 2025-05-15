@@ -5,8 +5,49 @@ from logging.handlers import RotatingFileHandler
 from datetime import datetime
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+import time
 
 from src.config import SLACK_BOT_TOKEN, SLACK_CHANNEL, LOG_LEVEL, LOG_FILE
+
+# Custom rotating file handler that handles Windows file locking issues
+class SafeRotatingFileHandler(RotatingFileHandler):
+    def __init__(self, filename, mode='a', maxBytes=0, backupCount=0, encoding=None, delay=True):
+        RotatingFileHandler.__init__(self, filename, mode, maxBytes, backupCount, encoding, delay)
+        
+    def doRollover(self):
+        """
+        Override doRollover to handle Windows file locking errors gracefully
+        """
+        if self.stream:
+            self.stream.close()
+            self.stream = None
+            
+        # Try to rotate the log file with retry logic for Windows
+        for i in range(5):  # Try 5 times
+            try:
+                if os.path.exists(self.baseFilename + ".1"):
+                    try:
+                        os.remove(self.baseFilename + ".1")
+                    except:
+                        pass
+                
+                if os.path.exists(self.baseFilename):
+                    try:
+                        os.rename(self.baseFilename, self.baseFilename + ".1")
+                        break
+                    except:
+                        time.sleep(0.1)  # Sleep briefly and retry
+                else:
+                    break
+            except:
+                if i == 4:  # Last attempt
+                    # If we can't rotate, just continue with the current file
+                    pass
+                time.sleep(0.1)
+        
+        # Open a new file
+        self.mode = 'w'
+        self.stream = self._open()
 
 # Ensure log directory exists
 os.makedirs(os.path.dirname(LOG_FILE), exist_ok=True)
@@ -21,8 +62,12 @@ console_handler.setLevel(getattr(logging, LOG_LEVEL))
 console_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 console_handler.setFormatter(console_format)
 
-# File handler
-file_handler = RotatingFileHandler(LOG_FILE, maxBytes=10485760, backupCount=5)
+# File handler - using the safer implementation
+file_handler = SafeRotatingFileHandler(
+    LOG_FILE, 
+    maxBytes=10485760, 
+    backupCount=5
+)
 file_handler.setLevel(getattr(logging, LOG_LEVEL))
 file_format = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(file_format)

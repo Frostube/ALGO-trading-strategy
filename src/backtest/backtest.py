@@ -321,18 +321,37 @@ class Backtester:
         Args:
             strategy: Strategy instance
             data: DataFrame with price data
-            train_test_split: Optional tuple with (train_start, train_end, test_start, test_end)
+            train_test_split: Either a tuple with (train_start, train_end, test_start, test_end)
+                              or a float representing the ratio to use for training (e.g., 0.8 for 80% training)
             
         Returns:
             dict: Backtest results
         """
         # Check if we should do train/test split
         if train_test_split is not None:
-            train_start, train_end, test_start, test_end = train_test_split
-            
-            # Extract train/test data
-            train_data = data[(data.index >= train_start) & (data.index <= train_end)]
-            test_data = data[(data.index >= test_start) & (data.index <= test_end)]
+            # Check if train_test_split is a float (ratio) or tuple (date ranges)
+            if isinstance(train_test_split, float):
+                # It's a split ratio (e.g. 0.8 for 80% training, 20% testing)
+                split_idx = int(len(data) * train_test_split)
+                train_data = data.iloc[:split_idx]
+                test_data = data.iloc[split_idx:]
+                
+                if len(train_data) > 0 and len(test_data) > 0:
+                    logger.info(f"Split data using ratio {train_test_split}: Train {len(train_data)} candles, Test {len(test_data)} candles")
+                else:
+                    logger.warning(f"Invalid train/test split: not enough data")
+                    return self._backtest_strategy(strategy, data)
+            else:
+                # It's a tuple of dates
+                try:
+                    train_start, train_end, test_start, test_end = train_test_split
+                    
+                    # Extract train/test data
+                    train_data = data[(data.index >= train_start) & (data.index <= train_end)]
+                    test_data = data[(data.index >= test_start) & (data.index <= test_end)]
+                except (ValueError, TypeError):
+                    logger.warning(f"Invalid train/test split format: {train_test_split}. Running on full dataset.")
+                    return self._backtest_strategy(strategy, data)
             
             # Run on train data
             logger.info(f"Running {strategy.name} on training data ({len(train_data)} candles)")
@@ -909,6 +928,139 @@ class Backtester:
             dict: Backtest results
         """
         return self._backtest_strategy(strategy, data, higher_tf_df)
+        
+    def plot_results(self, save_path=None):
+        """
+        Plot equity curve and drawdowns from backtest results.
+        
+        Args:
+            save_path: Optional path to save the plot image
+        """
+        if not self.results:
+            logger.warning("No results to plot. Run a backtest first.")
+            return
+            
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.dates as mdates
+            
+            # Create figure with subplots
+            fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
+            fig.suptitle('Backtest Results', fontsize=16)
+            
+            # Get equity and drawdown curves
+            if 'portfolio' in self.results:
+                # Use portfolio results if we have multiple symbols/strategies
+                result = self.results['portfolio']
+                title = 'Portfolio'
+            else:
+                # Use single strategy results
+                key = list(self.results.keys())[0]
+                result = self.results[key]
+                title = key
+                
+            # Check if we're dealing with train-test split
+            if 'train' in result and 'test' in result:
+                # Get equity curve and timestamps from training period
+                train_equity = result['train'].get('equity_curve', [])
+                train_dd = result['train'].get('drawdown_curve', [])
+                
+                # Get equity curve and timestamps from test period
+                test_equity = result['test'].get('equity_curve', [])
+                test_dd = result['test'].get('drawdown_curve', [])
+                
+                # Check if we have timestamps
+                if 'price_data' in result['train'] and 'price_data' in result['test']:
+                    train_dates = result['train']['price_data'].index
+                    test_dates = result['test']['price_data'].index
+                    
+                    # Plot train period with different color
+                    if len(train_equity) > 0 and len(train_dates) > 0:
+                        ax1.plot(train_dates[-len(train_equity):], train_equity, 'b-', label='Train')
+                        ax2.plot(train_dates[-len(train_dd):], train_dd, 'b-', label='Train DD')
+                    
+                    # Plot test period with different color
+                    if len(test_equity) > 0 and len(test_dates) > 0:
+                        ax1.plot(test_dates[-len(test_equity):], test_equity, 'g-', label='Test')
+                        ax2.plot(test_dates[-len(test_dd):], test_dd, 'g-', label='Test DD')
+                else:
+                    # No timestamps, use simple indices
+                    ax1.plot(train_equity, 'b-', label='Train')
+                    ax2.plot(train_dd, 'b-', label='Train DD')
+                    ax1.plot(range(len(train_equity), len(train_equity) + len(test_equity)), test_equity, 'g-', label='Test')
+                    ax2.plot(range(len(train_dd), len(train_dd) + len(test_dd)), test_dd, 'g-', label='Test DD')
+            else:
+                # Single period backtest
+                equity_curve = result.get('equity_curve', [])
+                drawdown_curve = result.get('drawdown_curve', [])
+                
+                # Check if we have timestamps
+                if 'price_data' in result:
+                    dates = result['price_data'].index
+                    
+                    # Plot equity curve
+                    if len(equity_curve) > 0 and len(dates) > 0:
+                        ax1.plot(dates[-len(equity_curve):], equity_curve, 'b-', label='Equity')
+                        ax2.plot(dates[-len(drawdown_curve):], drawdown_curve, 'r-', label='Drawdown')
+                else:
+                    # No timestamps, use simple indices
+                    ax1.plot(equity_curve, 'b-', label='Equity')
+                    ax2.plot(drawdown_curve, 'r-', label='Drawdown')
+            
+            # Format plots
+            ax1.set_title(f'{title} Equity Curve')
+            ax1.set_ylabel('Account Value ($)')
+            ax1.grid(True)
+            ax1.legend()
+            
+            ax2.set_title('Drawdown')
+            ax2.set_ylabel('Drawdown (%)')
+            ax2.set_ylim(bottom=0)
+            ax2.grid(True)
+            ax2.legend()
+            
+            # Format x-axis for dates if present
+            try:
+                ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
+                ax1.xaxis.set_major_locator(mdates.WeekdayLocator(interval=2))
+                plt.gcf().autofmt_xdate()
+            except:
+                # Not using dates, ignore
+                pass
+            
+            # Print summary statistics
+            if 'portfolio' in self.results:
+                r = self.results['portfolio']
+                total_return = r.get('total_return', 0) * 100
+                win_rate = r.get('win_rate', 0) * 100
+                profit_factor_val = r.get('profit_factor', 0)
+                max_dd = r.get('max_drawdown', 0) * 100
+                sharpe = r.get('sharpe_ratio', 0)
+                total_trades = r.get('total_trades', 0)
+                
+                plt.figtext(0.01, 0.01, 
+                    f"Return: {total_return:.2f}%, Win Rate: {win_rate:.2f}%, "
+                    f"Profit Factor: {profit_factor_val:.2f}, Max DD: {max_dd:.2f}%, "
+                    f"Sharpe: {sharpe:.2f}, Trades: {total_trades}",
+                    fontsize=10)
+            
+            # Adjust layout and save or show
+            plt.tight_layout()
+            plt.subplots_adjust(bottom=0.15)
+            
+            if save_path:
+                # Create directory if it doesn't exist
+                import os
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                plt.savefig(save_path)
+                logger.info(f"Saved plot to {save_path}")
+            else:
+                plt.show()
+                
+        except ImportError:
+            logger.warning("Matplotlib not installed. Cannot plot results.")
+        except Exception as e:
+            logger.error(f"Error plotting results: {str(e)}")
 
 def run_backtest(days=30, initial_balance=10000, plot=True):
     """Run a backtest with the specified parameters."""

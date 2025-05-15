@@ -41,7 +41,8 @@ class EMACrossoverStrategy(BaseStrategy):
                 fast_ema=5, slow_ema=13, trend_ema=50, atr_sl_multiplier=1.0,
                 risk_per_trade=0.0075, use_volatility_sizing=True, vol_target_pct=0.0075,
                 enable_pyramiding=False, max_pyramid_entries=2, health_monitor=None,
-                atr_trail_multiplier=1.25):
+                atr_trail_multiplier=1.25, atr_tp_multiplier=None, breakeven_trigger_r=0.5,
+                pyramid_threshold=0.5, pyramid_position_scale=0.5, min_hold_bars=0):
         # Initialize the base class first
         super().__init__(config)
         
@@ -63,15 +64,17 @@ class EMACrossoverStrategy(BaseStrategy):
             self.slow_ema = config.get('ema_slow', slow_ema)
             self.trend_ema = config.get('ema_trend', trend_ema)
             self.atr_sl_multiplier = config.get('atr_sl_multiplier', atr_sl_multiplier)
-            self.atr_tp_multiplier = config.get('atr_tp_multiplier', None)
+            self.atr_tp_multiplier = config.get('atr_tp_multiplier', atr_tp_multiplier)
             self.atr_trail_multiplier = config.get('atr_trail_multiplier', atr_trail_multiplier)
             self.risk_per_trade = config.get('risk_per_trade', risk_per_trade)
             self.use_volatility_sizing = config.get('use_volatility_sizing', use_volatility_sizing)
             self.vol_target_pct = config.get('vol_target_pct', vol_target_pct)
             self.enable_pyramiding = config.get('enable_pyramiding', enable_pyramiding)
             self.max_pyramid_entries = config.get('max_pyramid_entries', max_pyramid_entries)
-            self.pyramid_threshold = config.get('pyramid_threshold', 0.5)
-            self.pyramid_position_scale = config.get('pyramid_position_scale', 0.5)
+            self.pyramid_threshold = config.get('pyramid_threshold', pyramid_threshold)
+            self.pyramid_position_scale = config.get('pyramid_position_scale', pyramid_position_scale)
+            self.breakeven_trigger_r = config.get('breakeven_trigger_r', breakeven_trigger_r)
+            self.min_hold_bars = config.get('min_hold_bars', min_hold_bars)
             
             # RSI filter parameters
             self.use_rsi_filter = config.get('use_rsi_filter', True)
@@ -96,15 +99,17 @@ class EMACrossoverStrategy(BaseStrategy):
             self.slow_ema = slow_ema
             self.trend_ema = trend_ema
             self.atr_sl_multiplier = atr_sl_multiplier
-            self.atr_tp_multiplier = None  # Removed fixed TP
+            self.atr_tp_multiplier = atr_tp_multiplier  # Can be None for trailing stop only
             self.atr_trail_multiplier = atr_trail_multiplier  # IMPROVEMENT 1: Wider trail (1.25x default)
             self.risk_per_trade = risk_per_trade
             self.use_volatility_sizing = use_volatility_sizing
             self.vol_target_pct = vol_target_pct
             self.enable_pyramiding = enable_pyramiding
             self.max_pyramid_entries = max_pyramid_entries
-            self.pyramid_threshold = 0.5  # 0.5 × ATR
-            self.pyramid_position_scale = 0.5  # 50% of initial size
+            self.pyramid_threshold = pyramid_threshold
+            self.pyramid_position_scale = pyramid_position_scale
+            self.breakeven_trigger_r = breakeven_trigger_r
+            self.min_hold_bars = min_hold_bars
             
             # RSI filter parameters
             self.use_rsi_filter = True
@@ -246,6 +251,19 @@ class EMACrossoverStrategy(BaseStrategy):
         df.loc[:, 'atr'] = true_range.rolling(window=14).mean()
         df.loc[:, 'atr_pct'] = df['atr'] / df['close']
         
+        # Calculate RSI
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0)
+        loss = -delta.where(delta < 0, 0)
+        avg_gain = gain.ewm(com=self.rsi_period-1, min_periods=self.rsi_period).mean()
+        avg_loss = loss.ewm(com=self.rsi_period-1, min_periods=self.rsi_period).mean()
+        rs = avg_gain / avg_loss.replace(0, 1e-10)  # Avoid division by zero
+        df.loc[:, 'rsi'] = 100 - (100 / (1 + rs))
+        
+        # Calculate volume indicators
+        df.loc[:, 'volume_ma'] = df['volume'].rolling(window=20).mean()
+        df.loc[:, 'volume_ratio'] = df['volume'] / df['volume_ma']
+            
         return df
     
     def _calculate_rsi(self, df, period=14):
@@ -616,6 +634,17 @@ class EMACrossoverStrategy(BaseStrategy):
         trade = self.active_trade
         current_price = bar_data['close']
         
+        # Guard against None stop_loss
+        if trade['stop_loss'] is None:
+            # Initialize stop with a wide buffer
+            if 'atr' in bar_data and not pd.isna(bar_data['atr']):
+                buffer = bar_data['atr'] * 2
+            else:
+                buffer = current_price * 0.02  # Default to 2% of price
+                
+            trade['stop_loss'] = current_price - buffer if trade['side'] == "buy" else current_price + buffer
+            logger.info(f"Initialized missing stop loss at {trade['stop_loss']:.2f}")
+        
         # Update the max/min price seen for this trade
         if trade['side'] == 'buy':
             trade['max_price'] = max(trade['max_price'], current_price)
@@ -639,15 +668,15 @@ class EMACrossoverStrategy(BaseStrategy):
         # Store R multiple in trade data
         trade['current_r'] = r_multiple
         
-        # Move to breakeven after 0.5R profit
+        # Move to breakeven after reaching the trigger R-multiple 
         trade.setdefault('moved_to_breakeven', False)
-        if r_multiple >= 0.5 and not trade.get('moved_to_breakeven', False):
+        if r_multiple >= self.breakeven_trigger_r and not trade.get('moved_to_breakeven', False):
             if trade['side'] == 'buy':
                 trade['stop_loss'] = trade['entry_price']  # Move stop to entry price (breakeven)
             else:
                 trade['stop_loss'] = trade['entry_price']  # Same for shorts
             trade['moved_to_breakeven'] = True
-            logger.info(f"Moving stop to breakeven at {trade['entry_price']:.2f}")
+            logger.info(f"Moving stop to breakeven at {trade['entry_price']:.2f} (hit {r_multiple:.2f}R vs {self.breakeven_trigger_r}R trigger)")
         
         # Progressive trailing stop based on R multiple earned
         last_atr = bar_data.get('atr', 0)

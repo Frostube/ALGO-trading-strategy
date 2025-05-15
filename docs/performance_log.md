@@ -58,3 +58,4 @@
 - **Higher win rates** - Win rates improved from ~36% to ~62% in testing
 - **Improved parameter selection** - Optimizer now prioritizes consistent, repeatable edge rather than outlier PF values
 | 2025-05-15 | ETH/USDT | 4h | 120 | -7.21% | 8.10 | 50.00% | 7.34% | 4 |  |
+| 2025-05-15 | BTC/USDT, ETH/USDT | 4h | 30 | -1.84% | 0.00 | 0.00% | 2.25% | 1 |  |

@@ -25,9 +25,15 @@ DATABASE_URL = 'sqlite:///data/trading_data.db'
 EMA_FAST = 5  # Optimal fast EMA from grid search
 EMA_SLOW = 12  # Optimal slow EMA from grid search
 EMA_TREND = 200  # Added 200 EMA for trend filter
+
+# RSI parameters
 RSI_PERIOD = 14  # Standard RSI period
-RSI_OVERSOLD = 35  # Optimal RSI oversold threshold from grid search
-RSI_OVERBOUGHT = 65  # Optimal RSI overbought threshold from grid search
+RSI_OVERSOLD = 30  # Optimal RSI oversold threshold from grid search
+RSI_OVERBOUGHT = 70  # Optimal RSI overbought threshold from grid search
+RSI_LONG_THRESHOLD = 40  # RSI threshold for long entries in scalping strategy
+RSI_SHORT_THRESHOLD = 60  # RSI threshold for short entries in scalping strategy
+
+# Volume parameters
 VOLUME_PERIOD = 20  # Standard volume period
 VOL_RATIO_MIN = 1.2  # Optimal volume threshold from grid search
 VOLUME_THRESHOLD = 1.5  # Standard volume threshold
@@ -39,28 +45,29 @@ ORDER_TIMEOUT_MS = 700  # Maker order timeout in milliseconds
 # Risk management settings (Optimized for 4h timeframe)
 RISK_PER_TRADE = 0.0075  # Risk 0.75% of account per trade
 STOP_LOSS_PCT = 0.03  # Default stop loss (3%)
-TAKE_PROFIT_PCT = 0.05  # Default take profit (5%)
+TAKE_PROFIT_PCT = 0.06  # Default take profit (6%)
 USE_ATR_STOPS = True  # Always use ATR-based stops
-ATR_SL_MULTIPLIER = 1.5
-ATR_TP_MULTIPLIER = 2.0
+ATR_SL_MULTIPLIER = 1.0
+ATR_TP_MULTIPLIER = 3.0
 
 # Trailing stop settings
 USE_TRAILING_STOP = True  # Enable trailing stops
 TRAIL_ATR_MULTIPLIER = 1.0
-TRAIL_ACTIVATION_PCT = 0.015  # Start trailing at 1.5% profit
+TRAIL_ACTIVATION_PCT = 0.02  # Start trailing at 2% profit
 
 # Two-leg stop settings (for scalping strategy)
-USE_TWO_LEG_STOP = False  # Disable two-leg stop by default
+USE_TWO_LEG_STOP = True  # Use two-leg stop loss strategy in scalping
 
 # Volatility-based position sizing
 USE_VOLATILITY_SIZING = True  # New setting for volatility-targeted position sizing
 VOL_TARGET_PCT = 0.0075  # Target 0.75% daily volatility
 VOL_LOOKBACK = 20  # Use 20 periods for volatility calculation
-MAX_POSITION_PCT = 0.15  # Maximum position size as % of equity
+MAX_POSITION_PCT = 0.30  # Maximum position size as % of equity
 
 # Trade frequency controls (adjusted for 4h timeframe)
+MAX_TRADES_PER_DAY = 6  # Maximum trades per day
+MAX_TRADES_PER_HOUR = 2  # Maximum trades per hour
 MIN_BARS_BETWEEN_TRADES = 1  # Minimum bars between trades (from grid search)
-MAX_TRADES_PER_DAY = 3  # Limit to 3 trades per day
 MIN_CONSECUTIVE_BARS_AGREE = 2  # Require 2 consecutive bars to agree on direction
 
 # Dynamic trailing stop settings
@@ -114,4 +121,7 @@ ML_MIN_TRADES_FOR_TRAINING = 50  # Need at least 50 trades to train model
 WIN_RATE_TARGET = 0.45  # Target win rate of 45%
 PF_TARGET = 1.4  # Target profit factor of 1.4
 DRAWDOWN_TARGET = 0.15  # Target max drawdown of 15%
-TRADES_PER_MONTH_TARGET = 10  # Target 10 trades per month per symbol 
+TRADES_PER_MONTH_TARGET = 10  # Target 10 trades per month per symbol
+
+# Risk management parameters
+USE_SOFT_STOP = True  # Enable soft stop alerts for manual intervention 

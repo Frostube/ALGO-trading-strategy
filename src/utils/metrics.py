@@ -6,6 +6,8 @@ This module provides utility functions for calculating various trading and perfo
 
 # Minimum loss threshold to avoid division by very small numbers when calculating profit factor
 MIN_LOSS = 0.01  # USD
+# Commission per trade (one-way)
+COMMISSION = 0.04  # $0.04 per trade or whatever your exchange charges
 
 def profit_factor(wins, losses, min_loss=0.01, min_win_r=0.1):
     """
@@ -35,15 +37,16 @@ def profit_factor(wins, losses, min_loss=0.01, min_win_r=0.1):
     else:
         meaningful_wins = wins
     
-    gross_profit = sum(meaningful_wins) if meaningful_wins else 0.0
-    gross_loss = sum(abs(x) for x in losses) if losses else 0.0
+    # Include commission in the calculations
+    gross_profit = sum(meaningful_wins) - (len(meaningful_wins) * COMMISSION) if meaningful_wins else 0.0
+    gross_loss = sum(abs(x) for x in losses) + (len(losses) * COMMISSION) if losses else 0.0
     
     # Apply minimum loss value to prevent division by zero or unrealistic PF
     if gross_loss < min_loss:
         gross_loss = min_loss
     
     # Return 0 if no profit to avoid misleading PF values
-    if gross_profit == 0:
+    if gross_profit <= 0:
         return 0.0
         
     return gross_profit / gross_loss

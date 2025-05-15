@@ -103,6 +103,12 @@ def focused_grid_search():
     min_bars_between_trades_range = [1]
     atr_sl_multiplier_range = [1.0, 1.2, 1.4]
     
+    # Additional optimization parameters
+    breakeven_trigger_r_range = [0.5, 1.0, 1.2]  # R multiples to trigger breakeven
+    initial_trail_mult_range = [1.25, 1.5, 2.0]  # Initial trail ATR multiplier
+    tp_multiplier_range = [None, 3, 4]  # Take profit multiplier (None for trail only)
+    min_hold_bars_range = [0, 3]  # Minimum bars to hold a position
+    
     # Generate all parameter combinations
     param_combinations = []
     for params in itertools.product(
@@ -110,7 +116,9 @@ def focused_grid_search():
         rsi_overbought_range, volume_threshold_range, enable_pyramiding_range,
         max_pyramid_entries_range, pyramid_threshold_range, pyramid_position_scale_range,
         risk_per_trade_range, use_trend_filter_range, use_volatility_sizing_range,
-        vol_target_pct_range, min_bars_between_trades_range, atr_sl_multiplier_range
+        vol_target_pct_range, min_bars_between_trades_range, atr_sl_multiplier_range,
+        breakeven_trigger_r_range, initial_trail_mult_range, tp_multiplier_range,
+        min_hold_bars_range
     ):
         # Skip parameter sets where fast EMA >= slow EMA
         if params[0] >= params[1]:
@@ -134,6 +142,10 @@ def focused_grid_search():
             'vol_target_pct': params[13],
             'min_bars_between_trades': params[14],
             'atr_sl_multiplier': params[15],
+            'breakeven_trigger_r': params[16],
+            'atr_trail_multiplier': params[17],
+            'atr_tp_multiplier': params[18],
+            'min_hold_bars': params[19],
         }
         param_combinations.append(param_dict)
     
@@ -560,4 +572,6 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
     }
 
 if __name__ == "__main__":
+    from multiprocessing import freeze_support
+    freeze_support()  # Required for Windows multiprocessing
     focused_grid_search() 
