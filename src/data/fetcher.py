@@ -10,6 +10,10 @@ import time
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
 from collections import defaultdict
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 from src.config import (
     EXCHANGE, SYMBOL, TIMEFRAME, HIGHER_TIMEFRAME, BINANCE_API_KEY, 
@@ -17,6 +21,10 @@ from src.config import (
 )
 from src.db.models import OHLCV, init_db
 from src.utils.logger import logger
+
+# Get API credentials from environment variables or use values from config
+TESTNET_API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", BINANCE_API_KEY)
+TESTNET_SECRET_KEY = os.getenv("BINANCE_TESTNET_SECRET_KEY", BINANCE_SECRET_KEY)
 
 def fetch_ohlcv_full(ccxt_exch, symbol, tf, since_ms, limit=1000):
     """
@@ -159,30 +167,22 @@ class DataFetcher:
         
         # Set up REST exchange for historical data
         exchange_config = {
-            'apiKey': BINANCE_API_KEY,
-            'secret': BINANCE_SECRET_KEY,
+            'apiKey': TESTNET_API_KEY if use_testnet else BINANCE_API_KEY,
+            'secret': TESTNET_SECRET_KEY if use_testnet else BINANCE_SECRET_KEY,
             'enableRateLimit': True,
             'options': {
-                'defaultType': 'future' if FUTURES else 'spot'
+                'defaultType': 'future' if FUTURES else 'spot',
+                'adjustForTimeDifference': True,
+                'recvWindow': 60000
             }
         }
         
         # Configure testnet if requested
-        if use_testnet:
-            exchange_config['options']['test'] = True  # Enable test mode
-            
         self.rest_exchange = getattr(ccxt, self.exchange_id)(exchange_config)
         
-        # Configure testnet URLs if requested
         if use_testnet:
-            self.rest_exchange.urls['api'] = {
-                'public': 'https://testnet.binance.vision/api',
-                'private': 'https://testnet.binance.vision/api',
-                'v3': 'https://testnet.binance.vision/api/v3',
-                'v1': 'https://testnet.binance.vision/api/v1'
-            }
-            # Disable endpoints not available in testnet
-            self.rest_exchange.options['recvWindow'] = 5000
+            # Enable sandbox mode for testnet
+            self.rest_exchange.setSandboxMode(True)
             logger.info("Configured for Binance Testnet API")
         
         # Initialize database session
@@ -197,8 +197,8 @@ class DataFetcher:
     async def initialize_ws_exchange(self):
         """Initialize WebSocket exchange for real-time data."""
         self.ws_exchange = getattr(ccxtpro, self.exchange_id)({
-            'apiKey': BINANCE_API_KEY,
-            'secret': BINANCE_SECRET_KEY,
+            'apiKey': TESTNET_API_KEY if self.use_testnet else BINANCE_API_KEY,
+            'secret': TESTNET_SECRET_KEY if self.use_testnet else BINANCE_SECRET_KEY,
             'enableRateLimit': True,
             'options': {
                 'defaultType': 'future' if FUTURES else 'spot'
