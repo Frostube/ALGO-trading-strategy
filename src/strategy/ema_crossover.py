@@ -26,6 +26,11 @@ from src.db.models import Trade
 from src.strategy.base_strategy import BaseStrategy
 from src.utils.metrics import profit_factor
 
+# ATR trailing stop parameters
+ATR_TRAIL_START = 1.25   # Normal trailing stop multiplier
+ATR_TRAIL_LOSER = 1.00   # Tighter trailing stop for losing trades
+R_TRIGGER = 0.5          # Adverse move in R-multiples to trigger tighter trail
+
 class EMACrossoverStrategy(BaseStrategy):
     """
     EMA Crossover strategy that automatically finds optimal parameters.
@@ -519,7 +524,8 @@ class EMACrossoverStrategy(BaseStrategy):
             'max_price': current_price if side == 'buy' else float('inf'),  # Track max price for trailing stop (long)
             'min_price': current_price if side == 'sell' else 0,  # Track min price for trailing stop (short)
             'pyramid_count': 0,
-            'pyramid_levels': []
+            'pyramid_levels': [],
+            'trail_tightened': False  # Flag to track if the trailing stop has been tightened
         }
         
         # Log the trade
@@ -591,6 +597,30 @@ class EMACrossoverStrategy(BaseStrategy):
         # Store R multiple in trade data
         trade['current_r'] = r_multiple
         
+        # Calculate R-based profit relative to ATR (for trailing stop tightening)
+        if 'atr' in trade:
+            atr_entry = trade['atr']
+            pnl_r = (current_price - trade['entry_price']) / atr_entry
+            if trade['side'] == 'sell':
+                pnl_r = -pnl_r  # Invert for short trades
+                
+            # Check if trade is losing more than R_TRIGGER and needs tighter trail
+            if (not trade.get('trail_tightened')) and pnl_r < -R_TRIGGER:
+                if trade['side'] == 'buy':
+                    # For long trades, move trail closer up to current price
+                    new_trail = current_price - (ATR_TRAIL_LOSER * atr_entry)
+                    if 'trailing_stop' not in trade or new_trail > trade['trailing_stop']:
+                        trade['trailing_stop'] = new_trail
+                else:  # short position
+                    # For short trades, move trail closer down to current price
+                    new_trail = current_price + (ATR_TRAIL_LOSER * atr_entry)
+                    if 'trailing_stop' not in trade or new_trail < trade['trailing_stop']:
+                        trade['trailing_stop'] = new_trail
+                        
+                # Mark that we've tightened the trail to avoid doing it again
+                trade['trail_tightened'] = True
+                logger.info(f"Tightened trailing stop to {trade['trailing_stop']:.2f} after {pnl_r:.2f}R adverse move")
+        
         # Progressive trailing stop based on profit
         # More aggressive trailing as profit increases
         if r_multiple >= 2.0:
@@ -604,7 +634,7 @@ class EMACrossoverStrategy(BaseStrategy):
             trail_multiplier = 1.0
         else:
             # Default trailing stop multiplier
-            trail_multiplier = self.atr_trail_multiplier
+            trail_multiplier = ATR_TRAIL_START
         
         # Update max/min price seen for trailing stop calculations
         if trade['side'] == 'buy':

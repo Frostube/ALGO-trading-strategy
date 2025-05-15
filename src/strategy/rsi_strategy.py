@@ -17,6 +17,11 @@ from src.indicators.indicators import (
 from src.utils.logger import logger
 from src.utils.metrics import profit_factor
 
+# ATR trailing stop parameters
+ATR_TRAIL_START = 1.25   # Normal trailing stop multiplier
+ATR_TRAIL_LOSER = 1.00   # Tighter trailing stop for losing trades
+R_TRIGGER = 0.5          # Adverse move in R-multiples to trigger tighter trail
+
 class RSIOscillatorStrategy(BaseStrategy):
     """
     RSI Oscillator strategy that uses RSI reversals and volume confirmation.
@@ -330,13 +335,17 @@ class RSIOscillatorStrategy(BaseStrategy):
         """
         logger.info(f"RSI Strategy executed {trade_type} trade at {entry_price}, size: {position_size}")
         
-        # Reset pyramiding count if new trade
-        if trade_type != self.active_trade:
-            self.current_pyramid_entries = 1
-        else:
-            self.current_pyramid_entries += 1
-        
-        self.active_trade = trade_type
+        # Set active trade
+        self.active_trade = {
+            'symbol': self.symbol,
+            'side': trade_type,
+            'entry_time': timestamp or datetime.now(),
+            'entry_price': entry_price,
+            'amount': position_size,
+            'atr': self.last_atr_value if hasattr(self, 'last_atr_value') else None,
+            'trailing_stop': None,
+            'trail_tightened': False  # Track if the trail has been tightened
+        }
     
     def on_trade_exit(self, trade_type, entry_price, exit_price, position_size, pnl, timestamp=None):
         """
@@ -473,33 +482,248 @@ class RSIOscillatorStrategy(BaseStrategy):
         
         return df 
 
-    def generate_signal(self, i, df):
+    def generate_signal(self, df, current_positions=None):
         """
-        Generate trading signal for a specific candle.
+        Generate trading signals based on RSI.
         
         Args:
-            i: Index of the current candle
-            df: DataFrame with indicators and previous signals
-            
-        Returns:
-            Signal type: 'buy', 'sell', or '' (empty string for no signal)
-        """
-        # Skip if not enough bars between trades
-        current_time = df.index[i]
-        if self.last_trade_time and (current_time - self.last_trade_time).total_seconds() / 3600 < self.min_bars_between_trades * 4:
-            return ''
-            
-        current_signal = df['signal'].iloc[i]
+            df: DataFrame with price data and indicators
+            current_positions: Dictionary of current positions (optional)
         
-        if current_signal == 1:
-            signal_reason = f"RSI({df['rsi'].iloc[i]:.1f}) < {self.oversold} (oversold)"
+        Returns:
+            Signal ('buy', 'sell', or None)
+        """
+        if df.empty:
+            return None
+            
+        # Store the ATR value for use in position sizing and stop loss
+        if 'atr' in df.columns and not pd.isna(df.iloc[-1]['atr']):
+            self.last_atr_value = df.iloc[-1]['atr']
+            
+        # Check if we already have an active trade
+        if self.active_trade:
+            # Update the active trade with the latest data
+            self.update_active_trade(df.iloc[-1])
+            return None
+
+        # Continue with signal generation only if we don't have an active trade
+        # Skip if not enough bars between trades
+        current_time = df.index[-1]
+        if self.last_trade_time and (current_time - self.last_trade_time).total_seconds() / 3600 < self.min_bars_between_trades * 4:
+            return None
+        
+        # Get the current RSI value
+        if 'rsi' not in df.columns or pd.isna(df.iloc[-1]['rsi']):
+            return None
+            
+        current_rsi = df.iloc[-1]['rsi']
+        signal = None
+        
+        # Generate signals based on RSI thresholds
+        if current_rsi <= self.oversold:
+            signal_reason = f"RSI({current_rsi:.1f}) < {self.oversold} (oversold)"
             logger.info(f"Generated BUY signal for {self.symbol}: {signal_reason}")
             self.last_trade_time = current_time
-            return 'buy'
-        elif current_signal == -1:
-            signal_reason = f"RSI({df['rsi'].iloc[i]:.1f}) > {self.overbought} (overbought)"
+            signal = 'buy'
+        elif current_rsi >= self.overbought:
+            signal_reason = f"RSI({current_rsi:.1f}) > {self.overbought} (overbought)"
             logger.info(f"Generated SELL signal for {self.symbol}: {signal_reason}")
             self.last_trade_time = current_time
-            return 'sell'
+            signal = 'sell'
         
-        return '' 
+        # If we have a signal, calculate position size based on current price and ATR
+        if signal and self.portfolio_mgr and self.last_atr_value:
+            current_price = df.iloc[-1]['close']
+            
+            # Get the profit factor for dynamic sizing from health monitor if available
+            pf_recent = 1.0  # Default value
+            if hasattr(self, 'health') and hasattr(self.health, 'get_profit_factor_last_n'):
+                pf_recent = self.health.get_profit_factor_last_n(40)
+                
+            # Calculate position size with edge-weighted sizing
+            qty = self.portfolio_mgr.calculate_position_size(
+                self.symbol, 
+                current_price, 
+                self.last_atr_value, 
+                strat_name="rsi_oscillator", 
+                pf_recent=pf_recent
+            )
+            
+            # Store stop loss and take profit levels for the trade
+            if signal == 'buy':
+                stop_loss = current_price - (self.last_atr_value * self.atr_sl_multiplier)
+                take_profit = current_price + (self.last_atr_value * self.atr_tp_multiplier) if self.atr_tp_multiplier else None
+            else:  # 'sell'
+                stop_loss = current_price + (self.last_atr_value * self.atr_sl_multiplier)
+                take_profit = current_price - (self.last_atr_value * self.atr_tp_multiplier) if self.atr_tp_multiplier else None
+                
+            # Prepare trade
+            trade = {
+                'symbol': self.symbol,
+                'side': signal,
+                'entry_price': current_price,
+                'amount': qty,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'atr': self.last_atr_value,
+                'trail_tightened': False
+            }
+            
+            # Call trade execution handler
+            self.on_trade_executed(
+                trade_type=signal,
+                entry_price=current_price,
+                position_size=qty,
+                timestamp=current_time
+            )
+            
+            # Update the active trade with all the details
+            self.active_trade.update(trade)
+            
+        return signal
+
+    # Add a method to update active trades with ATR trailing stops
+    def update_active_trade(self, bar_data):
+        """
+        Update the active trade status with the latest price data.
+        
+        Args:
+            bar_data: Latest price bar data with indicators
+        """
+        if not self.active_trade:
+            return
+        
+        # Get current price
+        current_price = bar_data['close']
+        trade = self.active_trade
+        
+        # Update last price
+        trade['last_price'] = current_price
+        
+        # Calculate profit in R multiples
+        if 'stop_loss' in trade and trade['stop_loss'] is not None:
+            entry_risk = abs(trade['entry_price'] - trade['stop_loss'])
+            if trade['side'] == 'buy':
+                current_profit = current_price - trade['entry_price']
+                r_multiple = current_profit / entry_risk if entry_risk > 0 else 0
+            else:  # short position
+                current_profit = trade['entry_price'] - current_price
+                r_multiple = current_profit / entry_risk if entry_risk > 0 else 0
+            
+            # Store R multiple
+            trade['current_r'] = r_multiple
+        
+        # Calculate R-based profit relative to ATR (for trailing stop tightening)
+        if 'atr' in trade:
+            atr_entry = trade['atr']
+            pnl_r = (current_price - trade['entry_price']) / atr_entry
+            if trade['side'] == 'sell':
+                pnl_r = -pnl_r  # Invert for short trades
+                
+            # Check if trade is losing more than R_TRIGGER and needs tighter trail
+            if (not trade.get('trail_tightened')) and pnl_r < -R_TRIGGER:
+                if trade['side'] == 'buy':
+                    # For long trades, move trail closer up to current price
+                    new_trail = current_price - (ATR_TRAIL_LOSER * atr_entry)
+                    if 'trailing_stop' not in trade or new_trail > trade['trailing_stop']:
+                        trade['trailing_stop'] = new_trail
+                else:  # short position
+                    # For short trades, move trail closer down to current price
+                    new_trail = current_price + (ATR_TRAIL_LOSER * atr_entry)
+                    if 'trailing_stop' not in trade or new_trail < trade['trailing_stop']:
+                        trade['trailing_stop'] = new_trail
+                        
+                # Mark that we've tightened the trail to avoid doing it again
+                trade['trail_tightened'] = True
+                logger.info(f"Tightened trailing stop to {trade['trailing_stop']:.2f} after {pnl_r:.2f}R adverse move")
+        
+        # Update trailing stop based on ATR
+        if 'atr' in bar_data and not pd.isna(bar_data['atr']):
+            atr_value = bar_data['atr']
+            
+            # Calculate trail based on direction
+            if trade['side'] == 'buy':
+                # For long positions, trail below price
+                trail_distance = atr_value * ATR_TRAIL_START
+                trailing_stop = current_price - trail_distance
+                
+                # Only update trailing stop if it would move up (tighten)
+                if 'trailing_stop' not in trade or trailing_stop > trade['trailing_stop']:
+                    trade['trailing_stop'] = trailing_stop
+                    logger.info(f"Updated trailing stop to {trailing_stop:.2f} for long position")
+            else:
+                # For short positions, trail above price
+                trail_distance = atr_value * ATR_TRAIL_START
+                trailing_stop = current_price + trail_distance
+                
+                # Only update trailing stop if it would move down (tighten)
+                if 'trailing_stop' not in trade or trailing_stop < trade['trailing_stop']:
+                    trade['trailing_stop'] = trailing_stop
+                    logger.info(f"Updated trailing stop to {trailing_stop:.2f} for short position")
+        
+        # Check if stop loss or trailing stop has been hit
+        if trade['side'] == 'buy':
+            # For long positions
+            if 'trailing_stop' in trade and current_price <= trade['trailing_stop']:
+                self._close_trade(current_price, 'trailing_stop')
+            elif 'stop_loss' in trade and current_price <= trade['stop_loss']:
+                self._close_trade(current_price, 'stop_loss')
+            elif 'take_profit' in trade and current_price >= trade['take_profit']:
+                self._close_trade(current_price, 'take_profit')
+        else:
+            # For short positions
+            if 'trailing_stop' in trade and current_price >= trade['trailing_stop']:
+                self._close_trade(current_price, 'trailing_stop')
+            elif 'stop_loss' in trade and current_price >= trade['stop_loss']:
+                self._close_trade(current_price, 'stop_loss')
+            elif 'take_profit' in trade and current_price <= trade['take_profit']:
+                self._close_trade(current_price, 'take_profit')
+    
+    def _close_trade(self, exit_price, reason):
+        """
+        Close an active trade.
+        
+        Args:
+            exit_price: Exit price
+            reason: Exit reason ('stop_loss', 'take_profit', 'trailing_stop', etc.)
+        """
+        if not self.active_trade:
+            return None
+        
+        trade = self.active_trade
+        entry_price = trade['entry_price']
+        
+        # Calculate PnL
+        pnl = 0
+        if trade['side'] == 'buy':
+            pnl = (exit_price - entry_price) * trade['amount']
+        else:
+            pnl = (entry_price - exit_price) * trade['amount']
+        
+        # Record trade result
+        closed_trade = {
+            'symbol': trade['symbol'],
+            'side': trade['side'],
+            'entry_time': trade['entry_time'],
+            'exit_time': datetime.now(),
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'amount': trade['amount'],
+            'pnl': pnl,
+            'reason': reason
+        }
+        
+        # Call the on_trade_exit handler
+        self.on_trade_exit(
+            trade_type=trade['side'],
+            entry_price=entry_price,
+            exit_price=exit_price,
+            position_size=trade['amount'],
+            pnl=pnl,
+            timestamp=closed_trade['exit_time']
+        )
+        
+        # Reset active trade
+        self.active_trade = None
+        
+        return closed_trade 
