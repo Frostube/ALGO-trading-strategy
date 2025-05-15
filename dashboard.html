@@ -1,0 +1,478 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Algorithmic Trading Strategy Dashboard - BTC/USDT</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f8f9fa;
+            padding-top: 20px;
+        }
+        .card {
+            margin-bottom: 20px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+            border-radius: 8px;
+        }
+        .card-header {
+            background-color: #f1f8ff;
+            font-weight: 600;
+        }
+        .metric-card {
+            text-align: center;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            background-color: white;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+        .metric-value {
+            font-size: 24px;
+            font-weight: bold;
+        }
+        .metric-label {
+            font-size: 14px;
+            color: #6c757d;
+        }
+        .positive {
+            color: #28a745;
+        }
+        .negative {
+            color: #dc3545;
+        }
+        .neutral {
+            color: #6c757d;
+        }
+        .tag {
+            display: inline-block;
+            padding: 3px 8px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-right: 5px;
+        }
+        .tag-info {
+            background-color: #e3f2fd;
+            color: #0d6efd;
+        }
+        .tag-warning {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .chart-container {
+            width: 100%;
+            height: 400px;
+            margin-bottom: 20px;
+        }
+        .navbar-brand {
+            font-weight: bold;
+        }
+        .last-updated {
+            font-size: 12px;
+            color: #6c757d;
+            text-align: right;
+            margin-top: 5px;
+        }
+        .trade-table {
+            font-size: 14px;
+        }
+        .trade-win {
+            background-color: rgba(40, 167, 69, 0.1);
+        }
+        .trade-loss {
+            background-color: rgba(220, 53, 69, 0.1);
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <nav class="navbar navbar-expand-lg navbar-light bg-light mb-4 rounded">
+            <div class="container-fluid">
+                <a class="navbar-brand" href="#">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" fill="currentColor" class="bi bi-graph-up-arrow me-2" viewBox="0 0 16 16">
+                        <path fill-rule="evenodd" d="M0 0h1v15h15v1H0V0Zm10 3.5a.5.5 0 0 1 .5-.5h4a.5.5 0 0 1 .5.5v4a.5.5 0 0 1-1 0V4.9l-3.613 4.417a.5.5 0 0 1-.74.037L7.06 6.767l-3.656 5.027a.5.5 0 0 1-.808-.588l4-5.5a.5.5 0 0 1 .758-.06l2.609 2.61L13.445 4H10.5a.5.5 0 0 1-.5-.5Z"/>
+                    </svg>
+                    Trading Strategy Dashboard
+                </a>
+                <ul class="navbar-nav ms-auto">
+                    <li class="nav-item">
+                        <span class="nav-link">BTC/USDT 4h</span>
+                    </li>
+                </ul>
+            </div>
+        </nav>
+
+        <!-- Strategy Overview Panel -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <span>Strategy Performance Overview</span>
+                        <div>
+                            <span class="tag tag-info">EMA Crossover</span>
+                            <span class="tag tag-warning">30 Days</span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value positive">43.91%</div>
+                                    <div class="metric-label">Net Return</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value neutral">9</div>
+                                    <div class="metric-label">Total Trades</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value neutral">66.67%</div>
+                                    <div class="metric-label">Win Rate</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value negative">9.35%</div>
+                                    <div class="metric-label">Max Drawdown</div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row mt-3">
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value positive">$14,390.95</div>
+                                    <div class="metric-label">Final Equity</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value neutral">34.05</div>
+                                    <div class="metric-label">Profit Factor</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value negative">3.08%</div>
+                                    <div class="metric-label">Fee Impact</div>
+                                </div>
+                            </div>
+                            <div class="col-md-3">
+                                <div class="metric-card">
+                                    <div class="metric-value neutral">4.71</div>
+                                    <div class="metric-label">Sharpe Ratio</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Equity Curves Section -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        Equity Curve Analysis
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            
+                            <img src="results/equity_curves_BTC_USDT_4h_30d.png" alt="Equity Curves" class="img-fluid">
+                            
+                        </div>
+                        <div class="row mt-3">
+                            <div class="col-md-6">
+                                <h6>Performance Summary</h6>
+                                <ul class="list-group">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Initial Balance
+                                        <span>$10,000.00</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Final Gross Equity
+                                        <span>$10,299.39 (2.99%)</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Final Net Equity
+                                        <span>$14,390.95 (43.91%)</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Fee Impact
+                                        <span>3.08% of gross return</span>
+                                    </li>
+                                </ul>
+                            </div>
+                            <div class="col-md-6">
+                                <h6>Risk Metrics</h6>
+                                <ul class="list-group">
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Max Drawdown
+                                        <span>9.35%</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Return/Drawdown Ratio
+                                        <span>N/A</span>
+                                    </li>
+                                    <li class="list-group-item d-flex justify-content-between align-items-center">
+                                        Average Winning Trade
+                                        <span>$37.37</span>
+                                    </li>
+                                </ul>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Fee Analysis Section -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        Fee Impact Analysis
+                    </div>
+                    <div class="card-body">
+                        <div class="row">
+                            <div class="col-md-6">
+                                <div class="chart-container" style="height: 350px;">
+                                    
+                                    <img src="results/fee_impact_BTC_USDT_4h_30d.png" alt="Fee Impact" class="img-fluid">
+                                    
+                                </div>
+                            </div>
+                            <div class="col-md-6">
+                                <div class="chart-container" style="height: 350px;">
+                                    
+                                    <img src="results/fee_tier_comparison_BTC_USDT_4h_30d.png" alt="Fee Tier Comparison" class="img-fluid">
+                                    
+                                </div>
+                            </div>
+                        </div>
+                        <div class="row mt-3">
+                            <div class="col-md-12">
+                                <h6>Fee Breakdown</h6>
+                                <table class="table table-striped table-sm">
+                                    <thead>
+                                        <tr>
+                                            <th>Fee Type</th>
+                                            <th>Total Amount</th>
+                                            <th>% of Gross Profit</th>
+                                            <th>Per Trade (Avg)</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        <tr>
+                                            <td>Commission</td>
+                                            <td>$6.67</td>
+                                            <td>0%</td>
+                                            <td>0.0</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Slippage</td>
+                                            <td>$1.66</td>
+                                            <td>0%</td>
+                                            <td>0.0</td>
+                                        </tr>
+                                        <tr>
+                                            <td>Funding</td>
+                                            <td>$0.89</td>
+                                            <td>0%</td>
+                                            <td>0.0</td>
+                                        </tr>
+                                        <tr>
+                                            <td><strong>Total Fees</strong></td>
+                                            <td><strong>$9.22</strong></td>
+                                            <td><strong>3.08%</strong></td>
+                                            <td><strong>0.0</strong></td>
+                                        </tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Trade Details Section -->
+        <div class="row mb-4">
+            <div class="col-md-12">
+                <div class="card">
+                    <div class="card-header">
+                        Trade Details
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover trade-table">
+                                <thead>
+                                    <tr>
+                                        <th>#</th>
+                                        <th>Type</th>
+                                        <th>Entry Time</th>
+                                        <th>Exit Time</th>
+                                        <th>Entry Price</th>
+                                        <th>Exit Price</th>
+                                        <th>Size</th>
+                                        <th>Gross P&L</th>
+                                        <th>Net P&L</th>
+                                        <th>Fees</th>
+                                        <th>R Multiple</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    
+        <tr class="trade-win">
+            <td>1</td>
+            <td><span class="badge bg-success">Long</span></td>
+            <td>2023-04-01 08:00</td>
+            <td>2023-04-03 12:00</td>
+            <td>$28,450.00</td>
+            <td>$29,120.50</td>
+            <td>0.0350</td>
+            <td>$23.48</td>
+            <td>$22.36</td>
+            <td>$1.12</td>
+            <td>+0.22</td>
+        </tr>
+        
+        <tr class="trade-loss">
+            <td>2</td>
+            <td><span class="badge bg-danger">Short</span></td>
+            <td>2023-04-05 16:00</td>
+            <td>2023-04-06 00:00</td>
+            <td>$28,920.00</td>
+            <td>$29,145.30</td>
+            <td>0.0340</td>
+            <td>$-7.66</td>
+            <td>$-8.78</td>
+            <td>$1.12</td>
+            <td>-0.09</td>
+        </tr>
+        
+        <tr class="trade-win">
+            <td>3</td>
+            <td><span class="badge bg-success">Long</span></td>
+            <td>2023-04-10 04:00</td>
+            <td>2023-04-12 20:00</td>
+            <td>$29,840.00</td>
+            <td>$30,352.20</td>
+            <td>0.0330</td>
+            <td>$16.90</td>
+            <td>$15.86</td>
+            <td>$1.04</td>
+            <td>+0.16</td>
+        </tr>
+        
+        <tr class="trade-win">
+            <td>4</td>
+            <td><span class="badge bg-success">Long</span></td>
+            <td>2023-04-15 12:00</td>
+            <td>2023-04-18 08:00</td>
+            <td>$30,520.50</td>
+            <td>$31,780.90</td>
+            <td>0.0320</td>
+            <td>$40.33</td>
+            <td>$39.27</td>
+            <td>$1.06</td>
+            <td>+0.39</td>
+        </tr>
+        
+        <tr class="trade-win">
+            <td>5</td>
+            <td><span class="badge bg-danger">Short</span></td>
+            <td>2023-04-20 16:00</td>
+            <td>2023-04-22 04:00</td>
+            <td>$31,650.70</td>
+            <td>$31,400.20</td>
+            <td>0.0310</td>
+            <td>$7.76</td>
+            <td>$6.74</td>
+            <td>$1.02</td>
+            <td>+0.07</td>
+        </tr>
+        
+        <tr class="trade-win">
+            <td>6</td>
+            <td><span class="badge bg-danger">Short</span></td>
+            <td>2023-04-24 04:00</td>
+            <td>2023-04-25 20:00</td>
+            <td>$31,250.00</td>
+            <td>$30,890.50</td>
+            <td>0.0300</td>
+            <td>$10.79</td>
+            <td>$9.82</td>
+            <td>$0.97</td>
+            <td>+0.10</td>
+        </tr>
+        
+        <tr class="trade-win">
+            <td>7</td>
+            <td><span class="badge bg-success">Long</span></td>
+            <td>2023-04-28 08:00</td>
+            <td>2023-04-30 04:00</td>
+            <td>$31,050.40</td>
+            <td>$33,850.10</td>
+            <td>0.0290</td>
+            <td>$81.19</td>
+            <td>$80.22</td>
+            <td>$0.97</td>
+            <td>+0.80</td>
+        </tr>
+        
+        <tr class="trade-win">
+            <td>8</td>
+            <td><span class="badge bg-danger">Short</span></td>
+            <td>2023-05-03 16:00</td>
+            <td>2023-05-05 12:00</td>
+            <td>$33,790.20</td>
+            <td>$33,250.80</td>
+            <td>0.0280</td>
+            <td>$15.10</td>
+            <td>$14.17</td>
+            <td>$0.93</td>
+            <td>+0.14</td>
+        </tr>
+        
+        <tr class="trade-win">
+            <td>9</td>
+            <td><span class="badge bg-success">Long</span></td>
+            <td>2023-05-10 00:00</td>
+            <td>2023-05-15 20:00</td>
+            <td>$33,120.50</td>
+            <td>$37,250.30</td>
+            <td>0.0270</td>
+            <td>$111.50</td>
+            <td>$110.51</td>
+            <td>$0.99</td>
+            <td>+1.11</td>
+        </tr>
+        
+                                </tbody>
+                            </table>
+                        </div>
+                        <div class="last-updated">
+                            Last updated: <span id="last-updated">2025-05-15 20:41:26 UTC</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Footer -->
+        <footer class="bg-light text-center text-lg-start mt-5 rounded">
+            <div class="text-center p-3">
+                © 2023 Algorithmic Trading Dashboard
+            </div>
+        </footer>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html> 
