@@ -512,118 +512,84 @@ def plot_equity_curve_with_r_multiples(equity_curve, trades, output_path='report
         logger.error(f"Error saving equity curve plot: {str(e)}")
         return False
 
-def calculate_metrics(trades, initial_balance=10000.0):
+def calculate_metrics(df):
     """
-    Calculate comprehensive trading metrics from a list of trades.
+    Calculate basic performance metrics from signals DataFrame.
+    Expects 'signal' column with -1, 0, 1 and OHLCV in index.
     
     Args:
-        trades: List of trade dictionaries
-        initial_balance: Initial account balance
+        df: DataFrame with OHLCV data and signals
         
     Returns:
-        dict: Dictionary of calculated metrics
+        dict: Dictionary with performance metrics
+            - total_return: Total return as decimal (e.g., 0.25 for 25%)
+            - profit_factor: Gross profits divided by gross losses
+            - win_rate: Percentage of winning trades
+            - max_drawdown: Maximum drawdown as decimal
+            - n_trades: Number of trades
     """
-    if not trades:
-        return {
-            'net_profit': 0,
-            'net_profit_pct': 0,
-            'max_drawdown': 0,
-            'win_rate': 0,
-            'sharpe_ratio': 0,
-            'sortino_ratio': 0,
-            'profit_factor': 0,
-            'avg_r_multiple': 0,
-            'expectancy': 0,
-            'total_trades': 0
-        }
+    if df.empty or 'signal' not in df.columns:
+        return {'total_return': 0, 'profit_factor': 0, 'win_rate': 0,
+                'max_drawdown': 0, 'n_trades': 0}
     
-    # Extract winning and losing trades
-    winners = [t for t in trades if t.get('pnl', 0) > 0]
-    losers = [t for t in trades if t.get('pnl', 0) <= 0]
+    df = df.copy()
     
-    # Calculate basic metrics
-    win_count = len(winners)
-    loss_count = len(losers)
-    total_trades = win_count + loss_count
+    # Calculate returns
+    df['returns'] = df['close'].pct_change()
     
-    # Calculate win amounts and loss amounts
-    win_amounts = [t.get('pnl', 0) for t in winners]
-    loss_amounts = [t.get('pnl', 0) for t in losers]
+    # Strategy returns (lag signals to align with next period's returns)
+    df['strategy_returns'] = df['signal'].shift(1) * df['returns']
     
-    # Calculate win rate
-    win_rate_val = win_rate(winners, losers) * 100
+    # Count trades
+    df['trade_entry'] = df['signal'].diff().abs() > 0
+    n_trades = df['trade_entry'].sum()
     
-    # Calculate profit factor
-    pf = profit_factor(win_amounts, loss_amounts)
+    # Calculate total return
+    total_return = (1 + df['strategy_returns'].fillna(0)).cumprod().iloc[-1] - 1
     
-    # Calculate net profit
-    net_profit = sum(win_amounts) + sum(loss_amounts)
-    net_profit_pct = (net_profit / initial_balance) * 100
-    
-    # Calculate R-multiple metrics
-    r_metrics = calculate_r_multiples(trades)
-    avg_r = r_metrics.get('avg_r', 0)
-    expectancy = r_metrics.get('expectancy', 0)
-    
-    # Calculate equity curve
-    equity_curve = [initial_balance]
-    equity = initial_balance
-    
-    # Sort trades by time if available
-    if all('entry_time' in t for t in trades):
-        sorted_trades = sorted(trades, key=lambda x: x['entry_time'])
-    else:
-        sorted_trades = trades
-    
-    for trade in sorted_trades:
-        pnl = trade.get('pnl', 0)
-        equity += pnl
-        equity_curve.append(equity)
-    
-    # Calculate drawdown
-    max_dd = drawdown(equity_curve) * 100
-    
-    # Calculate Sharpe and Sortino ratios
-    returns = []
-    for i in range(1, len(equity_curve)):
-        ret = (equity_curve[i] - equity_curve[i-1]) / equity_curve[i-1]
-        returns.append(ret)
-    
-    if returns:
-        mean_return = np.mean(returns)
-        std_return = np.std(returns)
+    # Calculate win rate and profit factor
+    if n_trades > 0:
+        # Extract individual trade returns
+        trade_starts = df[df['trade_entry']].index
         
-        # Only negative returns for Sortino ratio
-        neg_returns = [r for r in returns if r < 0]
-        downside_std = np.std(neg_returns) if neg_returns else 1e-6
+        win_trades = 0
+        loss_trades = 0
+        gross_profits = 0
+        gross_losses = 0
         
-        # Annualized ratios (assuming daily returns)
-        sharpe = (mean_return / std_return) * np.sqrt(252) if std_return > 0 else 0
-        sortino = (mean_return / downside_std) * np.sqrt(252) if downside_std > 0 else 0
+        for i, start in enumerate(trade_starts):
+            if i < len(trade_starts) - 1:
+                end = trade_starts[i+1]
+                trade_return = df.loc[start:end, 'strategy_returns'].sum()
+            else:
+                trade_return = df.loc[start:, 'strategy_returns'].sum()
+            
+            if trade_return > 0:
+                win_trades += 1
+                gross_profits += trade_return
+            else:
+                loss_trades += 1
+                gross_losses += abs(trade_return)
+                
+        win_rate = win_trades / n_trades if n_trades > 0 else 0
+        profit_factor = gross_profits / gross_losses if gross_losses > 0 else float('inf')
     else:
-        sharpe = 0
-        sortino = 0
+        win_rate = 0
+        profit_factor = 0
     
-    # Build metrics dictionary
-    metrics = {
-        'net_profit': net_profit,
-        'net_profit_pct': net_profit_pct,
-        'max_drawdown': max_dd,
-        'win_rate': win_rate_val,
-        'sharpe_ratio': sharpe,
-        'sortino_ratio': sortino,
-        'profit_factor': pf,
-        'avg_r_multiple': avg_r,
-        'expectancy': expectancy,
-        'total_trades': total_trades,
-        'win_count': win_count,
-        'loss_count': loss_count,
-        'avg_win': np.mean(win_amounts) if win_amounts else 0,
-        'avg_loss': np.mean(loss_amounts) if loss_amounts else 0,
-        'equity_curve': equity_curve
+    # Calculate max drawdown
+    cum_returns = (1 + df['strategy_returns'].fillna(0)).cumprod()
+    peak = cum_returns.expanding(min_periods=1).max()
+    drawdown = (cum_returns / peak) - 1
+    max_drawdown = drawdown.min()
+    
+    return {
+        'total_return': total_return,
+        'profit_factor': profit_factor,
+        'win_rate': win_rate,
+        'max_drawdown': max_drawdown,
+        'n_trades': n_trades
     }
-    
-    return metrics
 
 def plot_equity_curve(equity_curves, output_path=None):
     """
