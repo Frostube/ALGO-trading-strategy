@@ -277,19 +277,19 @@
                                         <tr>
                                             <td>Commission</td>
                                             <td>{{ metrics.commission }}</td>
-                                            <td>{{ (metrics.commission|float / metrics.gross_pnl|default(1)|float * 100)|round(2) if metrics.gross_pnl|default(0)|float != 0 else 0 }}%</td>
+                                            <td>{{ (metrics.commission|float / abs(metrics.gross_pnl|default(1))|float * 100)|round(2) if metrics.gross_pnl|default(0)|float != 0 else 0 }}%</td>
                                             <td>{{ (metrics.commission|float / metrics.trade_count)|round(2) if metrics.trade_count > 0 else 0 }}</td>
                                         </tr>
                                         <tr>
                                             <td>Slippage</td>
                                             <td>{{ metrics.slippage }}</td>
-                                            <td>{{ (metrics.slippage|float / metrics.gross_pnl|default(1)|float * 100)|round(2) if metrics.gross_pnl|default(0)|float != 0 else 0 }}%</td>
+                                            <td>{{ (metrics.slippage|float / abs(metrics.gross_pnl|default(1))|float * 100)|round(2) if metrics.gross_pnl|default(0)|float != 0 else 0 }}%</td>
                                             <td>{{ (metrics.slippage|float / metrics.trade_count)|round(2) if metrics.trade_count > 0 else 0 }}</td>
                                         </tr>
                                         <tr>
                                             <td>Funding</td>
                                             <td>{{ metrics.funding }}</td>
-                                            <td>{{ (metrics.funding|float / metrics.gross_pnl|default(1)|float * 100)|round(2) if metrics.gross_pnl|default(0)|float != 0 else 0 }}%</td>
+                                            <td>{{ (metrics.funding|float / abs(metrics.gross_pnl|default(1))|float * 100)|round(2) if metrics.gross_pnl|default(0)|float != 0 else 0 }}%</td>
                                             <td>{{ (metrics.funding|float / metrics.trade_count)|round(2) if metrics.trade_count > 0 else 0 }}</td>
                                         </tr>
                                         <tr>

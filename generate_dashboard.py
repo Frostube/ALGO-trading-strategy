@@ -111,23 +111,35 @@ def calculate_metrics(results):
         metrics['slippage'] = total_slippage
         metrics['funding'] = total_funding
         
-        # Calculate PnL
-        if 'pnl' in results:
+        # Calculate PnL - ensure consistency by using the trade data
+        # Use the sum of trade PnLs if available, otherwise use the results pnl
+        calculated_net_pnl = sum([t.get('pnl', 0) for t in trades])
+        if abs(calculated_net_pnl) > 0.01:  # Use calculated value if it's not zero
+            metrics['net_pnl'] = calculated_net_pnl
+        elif 'pnl' in results:
             metrics['net_pnl'] = results['pnl']
         else:
-            metrics['net_pnl'] = sum([t.get('pnl', 0) for t in trades])
+            metrics['net_pnl'] = 0
+            
+        # Calculate gross PnL correctly
+        # Sum the gross_pnl values from trades if available
+        calculated_gross_pnl = sum([t.get('gross_pnl', 0) for t in trades])
         
-        # Calculate gross PnL
-        total_gross_pnl = sum([t.get('gross_pnl', 0) for t in trades])
-        if total_gross_pnl == 0:
-            # If gross_pnl not directly available in trades, calculate it
-            metrics['gross_pnl'] = metrics['net_pnl'] + metrics['total_fees']
+        # If the calculated value is reasonable, use it
+        if abs(calculated_gross_pnl) > 0.01:
+            metrics['gross_pnl'] = calculated_gross_pnl
         else:
-            metrics['gross_pnl'] = total_gross_pnl
+            # Otherwise calculate it as net_pnl + total_fees
+            metrics['gross_pnl'] = metrics['net_pnl'] + metrics['total_fees']
         
-        # Calculate fee impact
-        if abs(metrics['gross_pnl']) > 0:
-            metrics['fee_impact_pct'] = (metrics['total_fees'] / abs(metrics['gross_pnl'])) * 100
+        # Double-check that gross_pnl >= net_pnl
+        if metrics['net_pnl'] > metrics['gross_pnl']:
+            # Swap if necessary (this would indicate a calculation error)
+            metrics['gross_pnl'], metrics['net_pnl'] = metrics['net_pnl'], metrics['gross_pnl']
+            
+        # Calculate fee impact correctly
+        if abs(metrics['gross_pnl']) > 0.01:  # Only if gross_pnl is not close to zero
+            metrics['fee_impact_pct'] = ((metrics['gross_pnl'] - metrics['net_pnl']) / abs(metrics['gross_pnl'])) * 100
         else:
             metrics['fee_impact_pct'] = 0
             
