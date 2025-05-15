@@ -1,0 +1,57 @@
+{
+  "symbol": "ETH/USDT",
+  "updated_at": "2025-05-15T02:53:54.333873",
+  "parameters": [
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "2h",
+      "fast_ema": 5,
+      "slow_ema": 58,
+      "trend_ema": null,
+      "atr_mult": 0.8,
+      "train_profit_factor": 1.0746651814095802,
+      "train_win_rate": 0.3013698630136986,
+      "train_trades": 73,
+      "train_monthly_return": 0.960921558449107,
+      "test_profit_factor": 4.617293680315359,
+      "test_win_rate": 0.4666666666666667,
+      "test_trades": 15,
+      "test_monthly_return": 27.1086012456493,
+      "avg_monthly_return": 14.034761402049204
+    },
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "2h",
+      "fast_ema": 6,
+      "slow_ema": 50,
+      "trend_ema": null,
+      "atr_mult": 0.8,
+      "train_profit_factor": 0.9889193243284711,
+      "train_win_rate": 0.2911392405063291,
+      "train_trades": 79,
+      "train_monthly_return": -0.14741195955136535,
+      "test_profit_factor": 4.217385247875579,
+      "test_win_rate": 0.4666666666666667,
+      "test_trades": 15,
+      "test_monthly_return": 24.036133555343742,
+      "avg_monthly_return": 11.944360797896188
+    },
+    {
+      "symbol": "ETH/USDT",
+      "timeframe": "2h",
+      "fast_ema": 6,
+      "slow_ema": 52,
+      "trend_ema": null,
+      "atr_mult": 0.8,
+      "train_profit_factor": 0.9790555608789409,
+      "train_win_rate": 0.2857142857142857,
+      "train_trades": 77,
+      "train_monthly_return": -0.2780516489935859,
+      "test_profit_factor": 4.217385247875579,
+      "test_win_rate": 0.4666666666666667,
+      "test_trades": 15,
+      "test_monthly_return": 24.036133555343742,
+      "avg_monthly_return": 11.879040953175078
+    }
+  ]
+}

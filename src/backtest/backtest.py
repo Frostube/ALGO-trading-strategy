@@ -895,6 +895,21 @@ class Backtester:
             'max_drawdown': max_dd
         }
 
+    def run_single_backtest(self, strategy, data, higher_tf_df=None):
+        """
+        Run backtest for a single strategy with optional higher timeframe data.
+        Wrapper around _backtest_strategy for API compatibility.
+        
+        Args:
+            strategy: Strategy instance to backtest
+            data: DataFrame with OHLCV data
+            higher_tf_df: Optional DataFrame with higher timeframe data for confirmation
+            
+        Returns:
+            dict: Backtest results
+        """
+        return self._backtest_strategy(strategy, data, higher_tf_df)
+
 def run_backtest(days=30, initial_balance=10000, plot=True):
     """Run a backtest with the specified parameters."""
     logger.info(f"Running backtest with {days} days of data")

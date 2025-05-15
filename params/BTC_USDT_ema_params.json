@@ -1,0 +1,57 @@
+{
+  "symbol": "BTC/USDT",
+  "updated_at": "2025-05-15T11:28:18.116533",
+  "parameters": [
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "4h",
+      "fast_ema": 3,
+      "slow_ema": 30,
+      "trend_ema": null,
+      "atr_mult": 1.0,
+      "train_profit_factor": 1.3136595921975813,
+      "train_win_rate": 0.3382352941176471,
+      "train_trades": 68,
+      "train_monthly_return": 2.527749691534993,
+      "test_profit_factor": 3.1374320581623465,
+      "test_win_rate": 0.47368421052631576,
+      "test_trades": 19,
+      "test_monthly_return": 11.937793715224975,
+      "avg_monthly_return": 7.232771703379984
+    },
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "4h",
+      "fast_ema": 4,
+      "slow_ema": 28,
+      "trend_ema": null,
+      "atr_mult": 1.0,
+      "train_profit_factor": 1.1801949773092844,
+      "train_win_rate": 0.328125,
+      "train_trades": 64,
+      "train_monthly_return": 1.3925078951222407,
+      "test_profit_factor": 2.87198958601042,
+      "test_win_rate": 0.4666666666666667,
+      "test_trades": 15,
+      "test_monthly_return": 8.964796745096276,
+      "avg_monthly_return": 5.178652320109259
+    },
+    {
+      "symbol": "BTC/USDT",
+      "timeframe": "4h",
+      "fast_ema": 3,
+      "slow_ema": 32,
+      "trend_ema": null,
+      "atr_mult": 1.0,
+      "train_profit_factor": 1.2735059793384542,
+      "train_win_rate": 0.30303030303030304,
+      "train_trades": 66,
+      "train_monthly_return": 2.1764230553914468,
+      "test_profit_factor": 2.861244487388677,
+      "test_win_rate": 0.4666666666666667,
+      "test_trades": 15,
+      "test_monthly_return": 8.569406407561688,
+      "avg_monthly_return": 5.372914731476568
+    }
+  ]
+}

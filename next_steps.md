@@ -1,0 +1,109 @@
+# Next Steps for Strategy Enhancement
+
+## Current Status
+
+The EMA grid optimization is now running in the background for:
+1. ETH/USDT (in progress)
+2. SOL/USDT (queued)  
+3. BNB/USDT (queued)
+
+This process will generate optimized parameter files in the `params/` directory that will be automatically used by the trading strategy.
+
+## Testing the Optimized Parameters
+
+Once the grid search completes, run:
+
+```
+.\run_backtest_with_params.bat
+```
+
+This will execute a backtest using the optimized parameters across all symbols.
+
+## Next Edge Upgrades
+
+### Option 1: Realized Volatility Regime Switch
+
+The volatility regime switch is now ready for implementation. To activate it:
+
+1. Copy the code from `src/risk/vol_regime_switch.py` to your portfolio manager
+2. Make these changes to your existing portfolio manager:
+
+```python
+# --- In PortfolioManager.__init__ ---
+self.vol_monitor = VolatilityRegimeMonitor(lookback_days=30)
+self.base_risk = MAX_RISK_PER_TRADE  # Store base risk for scaling
+
+# --- In calculate_position_size method ---
+# Replace fixed risk_pct with dynamic risk
+risk_pct = self.current_risk_pct(symbol)
+
+# --- In allocate_capital method ---
+# Add regime check for pyramiding
+strategy.enable_pyramiding = self.vol_monitor.should_enable_pyramiding(symbol)
+```
+
+3. Test the volatility regime monitor:
+
+```
+python check_volatility_regimes.py --symbols "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT" --plot
+```
+
+### Option 2: Fee & Funding Cost Model
+
+The fee and funding model is ready for implementation:
+
+1. Copy the code from `src/utils/fee_model.py` to your project
+2. Integrate it with your trading engine:
+
+```python
+# --- In Account class ---
+self.fee_model = FeeModel(exchange_name='binance')
+
+# --- In place_order method ---
+execution_details = self.fee_model.execute_order(
+    symbol=symbol,
+    side=side,
+    quantity=quantity,
+    price=price,
+    order_type=order_type
+)
+
+# Store fees in trade record
+trade['fee_amount'] = execution_details['fee_amount']
+trade['slippage_pct'] = execution_details['slippage_pct']
+
+# --- In update method ---
+# Apply funding payments every 8 hours
+positions, funding_applied = self.fee_model.update_positions_with_funding(
+    self.positions, 
+    current_time=datetime.now()
+)
+```
+
+3. Update the backtest reporting to show fee and funding impact:
+
+```python
+# In performance report
+print(f"Gross P&L: ${backtest_results['gross_pnl']:.2f}")
+print(f"Fee Cost: ${backtest_results['fee_cost']:.2f} ({backtest_results['fee_impact']:.2f}%)")
+print(f"Funding Cost: ${backtest_results['funding_cost']:.2f} ({backtest_results['funding_impact']:.2f}%)")
+print(f"Net P&L: ${backtest_results['net_pnl']:.2f}")
+```
+
+## Recommended Order of Implementation
+
+1. **First**: Complete the EMA grid optimization (already running)
+2. **Second**: Implement the volatility regime switch (higher expected impact)
+3. **Third**: Add the fee & funding model (critical before going live)
+
+This order maximizes the chance of reaching the 10-30% per quarter target before accounting for costs.
+
+## Commit Changes
+
+After all implementations are complete:
+
+```
+git add .
+git commit -m "Added EMA grid optimization, volatility regime switch, and fee model"
+git push
+``` 

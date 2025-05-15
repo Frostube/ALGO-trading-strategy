@@ -1,0 +1,23 @@
+{
+  "strategy_name": "ema_crossover",
+  "symbol": "BNB/USDT",
+  "window_size": 40,
+  "trades": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "win_count": 0,
+  "loss_count": 9,
+  "total_profit": 0,
+  "total_loss": 110.23606316734033,
+  "is_trading_paused": false,
+  "pause_until": null,
+  "updated_at": "2025-05-15T02:01:40.568431"
+}

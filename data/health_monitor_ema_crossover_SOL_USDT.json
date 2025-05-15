@@ -1,0 +1,27 @@
+{
+  "strategy_name": "ema_crossover",
+  "symbol": "SOL/USDT",
+  "window_size": 40,
+  "trades": [
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0
+  ],
+  "win_count": 0,
+  "loss_count": 13,
+  "total_profit": 0,
+  "total_loss": 148.99823633986782,
+  "is_trading_paused": false,
+  "pause_until": null,
+  "updated_at": "2025-05-15T02:01:40.408419"
+}

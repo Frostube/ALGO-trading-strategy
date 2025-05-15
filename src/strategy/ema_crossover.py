@@ -212,7 +212,7 @@ class EMACrossoverStrategy(BaseStrategy):
     
     def apply_indicators(self, df):
         """
-        Apply all indicators needed for strategy execution.
+        Apply technical indicators to DataFrame
         
         Args:
             df: DataFrame with OHLCV data
@@ -220,40 +220,31 @@ class EMACrossoverStrategy(BaseStrategy):
         Returns:
             DataFrame with indicators added
         """
-        # Calculate EMAs
-        df['ema_fast'] = df['close'].ewm(span=self.fast_ema).mean()
-        df['ema_slow'] = df['close'].ewm(span=self.slow_ema).mean()
-        df['ema_trend'] = df['close'].ewm(span=self.trend_ema).mean()
+        # Make a copy to avoid SettingWithCopyWarning
+        df = df.copy()
         
-        # Add crossover signals
-        df['ema_crossover'] = 0
-        # When fast EMA crosses above slow EMA, set to 1
-        df.loc[(df['ema_fast'] > df['ema_slow']) & (df['ema_fast'].shift(1) <= df['ema_slow'].shift(1)), 'ema_crossover'] = 1
-        # When fast EMA crosses below slow EMA, set to -1
-        df.loc[(df['ema_fast'] < df['ema_slow']) & (df['ema_fast'].shift(1) >= df['ema_slow'].shift(1)), 'ema_crossover'] = -1
+        # Apply EMAs
+        df.loc[:, 'ema_fast'] = df['close'].ewm(span=self.fast_ema).mean()
+        df.loc[:, 'ema_slow'] = df['close'].ewm(span=self.slow_ema).mean()
+        df.loc[:, 'ema_trend'] = df['close'].ewm(span=self.trend_ema).mean()
         
-        # Calculate ATR for volatility sizing and dynamic trend filtering
+        # Calculate EMA crossover points
+        df.loc[:, 'ema_crossover'] = 0
+        
+        # Determine crossover points
+        for i in range(1, len(df)):
+            if df['ema_fast'].iloc[i] > df['ema_slow'].iloc[i] and df['ema_fast'].iloc[i-1] <= df['ema_slow'].iloc[i-1]:
+                df.loc[df.index[i], 'ema_crossover'] = 1  # Bullish crossover
+            elif df['ema_fast'].iloc[i] < df['ema_slow'].iloc[i] and df['ema_fast'].iloc[i-1] >= df['ema_slow'].iloc[i-1]:
+                df.loc[df.index[i], 'ema_crossover'] = -1  # Bearish crossover
+        
+        # Calculate ATR
         high_low = df['high'] - df['low']
-        high_close = abs(df['high'] - df['close'].shift(1))
-        low_close = abs(df['low'] - df['close'].shift(1))
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = ranges.max(axis=1)
-        df['atr'] = true_range.rolling(window=14).mean()
-        
-        # Calculate ATR as percentage of price for dynamic trend filtering
-        df['atr_pct'] = df['atr'] / df['close']
-        
-        # Calculate RSI
-        df = self._calculate_rsi(df, period=self.rsi_period)
-        
-        # Calculate volume indicators
-        df['volume_ma'] = df['volume'].rolling(window=20).mean()
-        df['volume_ratio'] = df['volume'] / df['volume_ma']
-        df['volume_spike'] = df['volume_ratio'] > 2.0  # True when volume is >2x the average
-        
-        # Save the latest ATR value for position sizing
-        if len(df) > 0:
-            self.last_atr_value = df['atr'].iloc[-1]
+        high_close = abs(df['high'] - df['close'].shift())
+        low_close = abs(df['low'] - df['close'].shift())
+        true_range = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1)
+        df.loc[:, 'atr'] = true_range.rolling(window=14).mean()
+        df.loc[:, 'atr_pct'] = df['atr'] / df['close']
         
         return df
     
@@ -609,25 +600,31 @@ class EMACrossoverStrategy(BaseStrategy):
         
         return self.active_trade
     
-    def _update_active_trade(self, latest_bar):
+    def _update_active_trade(self, bar_data):
         """
-        Update the active trade status with the latest price data.
+        Update the active trade state with new price data
         
         Args:
-            latest_bar: Latest price bar data
+            bar_data: Dictionary with latest price data
+            
+        Returns:
+            dict: Updated trade state
         """
         if not self.active_trade:
-            return
+            return {}
         
-        current_price = latest_bar['close']
         trade = self.active_trade
+        current_price = bar_data['close']
         
-        # Update last price
-        trade['last_price'] = current_price
-        
-        # Check for pyramiding opportunity
-        if self.enable_pyramiding and self.last_atr_value:
-            self._check_pyramid_opportunity(current_price, latest_bar)
+        # Update the max/min price seen for this trade
+        if trade['side'] == 'buy':
+            trade['max_price'] = max(trade['max_price'], current_price)
+        else:
+            # For short positions, track the minimum price
+            if trade.get('min_price', 0) == 0:
+                trade['min_price'] = current_price
+            else:
+                trade['min_price'] = min(trade['min_price'], current_price)
         
         # Calculate profit in R multiples (risk units)
         if trade['side'] == 'buy':
@@ -644,124 +641,67 @@ class EMACrossoverStrategy(BaseStrategy):
         
         # Move to breakeven after 0.5R profit
         trade.setdefault('moved_to_breakeven', False)
-        if r_multiple >= 0.5 and not trade['moved_to_breakeven']:
+        if r_multiple >= 0.5 and not trade.get('moved_to_breakeven', False):
             if trade['side'] == 'buy':
-                # Add small buffer (10% of ATR)
-                buffer = self.last_atr_value * 0.1 if self.last_atr_value else current_price * 0.001
-                new_stop = trade['entry_price'] + buffer
-                
-                # Only update if it would raise the stop
-                if trade['stop_loss'] < new_stop:
-                    trade['stop_loss'] = new_stop
-                    trade['moved_to_breakeven'] = True
-                    logger.info(f"Moved stop loss to breakeven+ at {new_stop:.2f} after reaching {r_multiple:.2f}R profit")
-            else:  # sell/short position
-                # Add small buffer (10% of ATR)
-                buffer = self.last_atr_value * 0.1 if self.last_atr_value else current_price * 0.001
-                new_stop = trade['entry_price'] - buffer
-                
-                # Only update if it would lower the stop
-                if trade['stop_loss'] > new_stop:
-                    trade['stop_loss'] = new_stop
-                    trade['moved_to_breakeven'] = True
-                    logger.info(f"Moved stop loss to breakeven+ at {new_stop:.2f} after reaching {r_multiple:.2f}R profit")
-                    
-        # Calculate R-based profit relative to ATR (for trailing stop tightening)
-        if 'atr' in trade:
-            atr_entry = trade['atr']
-            pnl_r = (current_price - trade['entry_price']) / atr_entry
-            if trade['side'] == 'sell':
-                pnl_r = -pnl_r  # Invert for short trades
-                
-            # Check if trade is losing more than R_TRIGGER and needs tighter trail
-            if (not trade.get('trail_tightened')) and pnl_r < -R_TRIGGER:
-                if trade['side'] == 'buy':
-                    # For long trades, move trail closer up to current price
-                    new_trail = current_price - (ATR_TRAIL_LOSER * atr_entry)
-                    if 'trailing_stop' not in trade or new_trail > trade['trailing_stop']:
-                        trade['trailing_stop'] = new_trail
-                else:  # short position
-                    # For short trades, move trail closer down to current price
-                    new_trail = current_price + (ATR_TRAIL_LOSER * atr_entry)
-                    if 'trailing_stop' not in trade or new_trail < trade['trailing_stop']:
-                        trade['trailing_stop'] = new_trail
-                        
-                # Mark that we've tightened the trail to avoid doing it again
-                trade['trail_tightened'] = True
-                logger.info(f"Tightened trailing stop to {trade['trailing_stop']:.2f} after {pnl_r:.2f}R adverse move")
+                trade['stop_loss'] = trade['entry_price']  # Move stop to entry price (breakeven)
+            else:
+                trade['stop_loss'] = trade['entry_price']  # Same for shorts
+            trade['moved_to_breakeven'] = True
+            logger.info(f"Moving stop to breakeven at {trade['entry_price']:.2f}")
         
-        # Progressive trailing stop based on profit
-        # More aggressive trailing as profit increases
+        # Progressive trailing stop based on R multiple earned
+        last_atr = bar_data.get('atr', 0)
+        
+        # Use different trail multipliers based on profit level
+        trail_multiplier = 1.0  # Default trail distance
+        
+        # Determine tighter trailing stop levels based on profit
         if r_multiple >= 2.0:
-            # When profit >= 2R, use even tighter trailing (0.5 × ATR)
-            trail_multiplier = 0.5
+            trail_multiplier = 0.75  # Tightest trail - 75% of ATR
+            if not trade.get('trail_tightened', False):
+                trade['trail_tightened'] = True
+                logger.info(f"Tightening trail to 0.75×ATR at {current_price:.2f} (2.0R profit)")
         elif r_multiple >= 1.5:
-            # When profit >= 1.5R, use tighter trailing (0.75 × ATR)
-            trail_multiplier = 0.75
+            trail_multiplier = 0.9  # Medium trail - 90% of ATR
+            if not trade.get('trail_tightened', False):
+                trade['trail_tightened'] = True
+                logger.info(f"Tightening trail to 0.9×ATR at {current_price:.2f} (1.5R profit)")
         elif r_multiple >= 1.0:
-            # When profit >= 1R, use normal trailing (1.0 × ATR)
-            trail_multiplier = 1.0
-        else:
-            # Default trailing stop multiplier - wider to let trades breathe
-            trail_multiplier = self.atr_trail_multiplier  # Default is 1.25
+            trail_multiplier = 1.0  # Full ATR
+            if not trade.get('trail_tightened', False):
+                trade['trail_tightened'] = True
+                logger.info(f"Setting trail to 1.0×ATR at {current_price:.2f} (1.0R profit)")
         
-        # Update max/min price seen for trailing stop calculations
-        if trade['side'] == 'buy':
-            # For long positions, track the highest price seen
-            if current_price > trade['max_price']:
-                trade['max_price'] = current_price
+        # Update trailing stop if in profit and after breakeven
+        if trade.get('moved_to_breakeven', False) and last_atr > 0:
+            # For buy orders, trail below price
+            if trade['side'] == 'buy':
+                new_stop = current_price - (trail_multiplier * last_atr)
                 
-                # Update trailing stop if applicable and ATR value is available
-                if self.last_atr_value:
-                    # Calculate new trailing stop using ATR and the adjusted multiplier
-                    new_trailing_stop = trade['max_price'] - (self.last_atr_value * trail_multiplier)
-                    
-                    # Only update if it would move the stop higher (for long positions)
-                    if trade['trailing_stop'] is None or new_trailing_stop > trade['trailing_stop']:
-                        trade['trailing_stop'] = new_trailing_stop
-                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f}, multiplier={trail_multiplier})")
-                        
-                        # Once we're at 0.5R profit, make sure trailing stop is at least at breakeven
-                        if r_multiple >= 0.5 and new_trailing_stop < trade['entry_price']:
-                            trade['trailing_stop'] = trade['entry_price']
-                            logger.info(f"Moved trailing stop to breakeven at {trade['entry_price']:.2f}")
-        else:  # short position
-            # For short positions, track the lowest price seen
-            if current_price < trade['min_price']:
-                trade['min_price'] = current_price
+                # Only move the stop up, never down
+                if new_stop > trade['stop_loss']:
+                    old_stop = trade['stop_loss']
+                    trade['stop_loss'] = new_stop
+                    trade['trailing_stop'] = new_stop
+                    if abs(new_stop - old_stop) > (0.1 * last_atr):  # Log only significant changes
+                        logger.info(f"Trail up: {old_stop:.2f} → {new_stop:.2f} ({(new_stop-old_stop):.2f})")
+            
+            # For short orders, trail above price
+            else:
+                new_stop = current_price + (trail_multiplier * last_atr)
                 
-                # Update trailing stop if applicable and ATR value is available
-                if self.last_atr_value:
-                    # Calculate new trailing stop using ATR and the adjusted multiplier
-                    new_trailing_stop = trade['min_price'] + (self.last_atr_value * trail_multiplier)
-                    
-                    # Only update if it would move the stop lower (for short positions)
-                    if trade['trailing_stop'] is None or new_trailing_stop < trade['trailing_stop']:
-                        trade['trailing_stop'] = new_trailing_stop
-                        logger.info(f"Updated trailing stop to {new_trailing_stop:.2f} for {trade['side']} trade (R={r_multiple:.2f}, multiplier={trail_multiplier})")
-                        
-                        # Once we're at 0.5R profit, make sure trailing stop is at least at breakeven
-                        if r_multiple >= 0.5 and new_trailing_stop > trade['entry_price']:
-                            trade['trailing_stop'] = trade['entry_price']
-                            logger.info(f"Moved trailing stop to breakeven at {trade['entry_price']:.2f}")
+                # Only move the stop down, never up
+                if new_stop < trade['stop_loss'] or trade['trailing_stop'] is None:
+                    old_stop = trade['stop_loss']
+                    trade['stop_loss'] = new_stop
+                    trade['trailing_stop'] = new_stop
+                    if abs(new_stop - old_stop) > (0.1 * last_atr):  # Log only significant changes
+                        logger.info(f"Trail down: {old_stop:.2f} → {new_stop:.2f} ({(old_stop-new_stop):.2f})")
         
-        # Check if stop loss or take profit has been hit
-        if trade['side'] == 'buy':
-            # For long positions
-            if trade['trailing_stop'] and current_price <= trade['trailing_stop']:
-                self._close_trade(current_price, 'trailing_stop')
-            elif current_price <= trade['stop_loss']:
-                self._close_trade(current_price, 'stop_loss')
-            elif trade['take_profit'] and current_price >= trade['take_profit']:
-                self._close_trade(current_price, 'take_profit')
-        else:
-            # For short positions
-            if trade['trailing_stop'] and current_price >= trade['trailing_stop']:
-                self._close_trade(current_price, 'trailing_stop')
-            elif current_price >= trade['stop_loss']:
-                self._close_trade(current_price, 'stop_loss')
-            elif trade['take_profit'] and current_price <= trade['take_profit']:
-                self._close_trade(current_price, 'take_profit')
+        # Update last price
+        trade['last_price'] = current_price
+        
+        return trade
     
     def _check_pyramid_opportunity(self, current_price, latest_bar):
         """

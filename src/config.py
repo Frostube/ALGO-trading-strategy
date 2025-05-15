@@ -22,13 +22,14 @@ SLACK_CHANNEL = os.getenv('SLACK_CHANNEL')
 DATABASE_URL = 'sqlite:///data/trading_data.db'
 
 # Indicator parameters (Optimized for 4h timeframe)
-EMA_FAST = 10  # Changed from 9 to 10 (more suitable for 4h timeframe)
-EMA_SLOW = 40  # Changed from 16 to 40 (more suitable for 4h timeframe)
+EMA_FAST = 5  # Optimal fast EMA from grid search
+EMA_SLOW = 12  # Optimal slow EMA from grid search
 EMA_TREND = 200  # Added 200 EMA for trend filter
-RSI_PERIOD = 14  # Changed back to standard 14 (was 7)
-RSI_LONG_THRESHOLD = 30  # Changed from 25 to standard 30
-RSI_SHORT_THRESHOLD = 70  # Changed from 69 to standard 70
+RSI_PERIOD = 14  # Standard RSI period
+RSI_OVERSOLD = 35  # Optimal RSI oversold threshold from grid search
+RSI_OVERBOUGHT = 65  # Optimal RSI overbought threshold from grid search
 VOLUME_PERIOD = 20  # Standard volume period
+VOL_RATIO_MIN = 1.2  # Optimal volume threshold from grid search
 VOLUME_THRESHOLD = 1.5  # Standard volume threshold
 ATR_PERIOD = 14  # Standard ATR period
 
@@ -36,29 +37,29 @@ ATR_PERIOD = 14  # Standard ATR period
 ORDER_TIMEOUT_MS = 700  # Maker order timeout in milliseconds
 
 # Risk management settings (Optimized for 4h timeframe)
-RISK_PER_TRADE = 0.0075  # Changed from 0.01 to 0.75% of account per trade
-STOP_LOSS_PCT = 0.02  # Increased to 2% for longer timeframe (fallback if ATR not available)
-TAKE_PROFIT_PCT = None  # Removed fixed take profit - using trailing stops instead
+RISK_PER_TRADE = 0.0075  # Risk 0.75% of account per trade
+STOP_LOSS_PCT = 0.03  # Default stop loss (3%)
+TAKE_PROFIT_PCT = 0.05  # Default take profit (5%)
 USE_ATR_STOPS = True  # Always use ATR-based stops
-ATR_SL_MULTIPLIER = 1.0  # Changed from 1.3 to 1.0 - using 1× ATR for stop loss
-ATR_TP_MULTIPLIER = None  # No fixed take profit multiplier - using trailing stops instead
+ATR_SL_MULTIPLIER = 1.5
+ATR_TP_MULTIPLIER = 2.0
 
 # Trailing stop settings
 USE_TRAILING_STOP = True  # Enable trailing stops
-TRAIL_ATR_MULTIPLIER = 1.0  # Use 1× ATR for trailing stops
-TRAIL_ACTIVATION_PCT = 0.005  # Activate trailing stop after 0.5% move in our favor
+TRAIL_ATR_MULTIPLIER = 1.0
+TRAIL_ACTIVATION_PCT = 0.015  # Start trailing at 1.5% profit
 
 # Two-leg stop settings (for scalping strategy)
 USE_TWO_LEG_STOP = False  # Disable two-leg stop by default
 
 # Volatility-based position sizing
 USE_VOLATILITY_SIZING = True  # New setting for volatility-targeted position sizing
-VOL_TARGET_PCT = 0.0075  # Target 0.75% volatility per trade
+VOL_TARGET_PCT = 0.0075  # Target 0.75% daily volatility
 VOL_LOOKBACK = 20  # Use 20 periods for volatility calculation
-MAX_POSITION_PCT = 0.20  # Cap position size at 20% of account
+MAX_POSITION_PCT = 0.15  # Maximum position size as % of equity
 
 # Trade frequency controls (adjusted for 4h timeframe)
-MIN_BARS_BETWEEN_TRADES = 2  # Allow trades every 2 bars (8 hours)
+MIN_BARS_BETWEEN_TRADES = 1  # Minimum bars between trades (from grid search)
 MAX_TRADES_PER_DAY = 3  # Limit to 3 trades per day
 MIN_CONSECUTIVE_BARS_AGREE = 2  # Require 2 consecutive bars to agree on direction
 
@@ -83,9 +84,9 @@ HIGH_VOLATILITY_HOURS = []
 WEEKEND_TRADING = True
 
 # Backtesting settings
-SLIPPAGE = 0.0004  # 0.04%
-COMMISSION = 0.0002  # 0.02%
-BACKTEST_TRAIN_SPLIT = 0.8  # 80% training, 20% testing
+SLIPPAGE = 0.0005  # Estimated slippage
+COMMISSION = 0.0006  # 0.06% taker fee on most exchanges
+BACKTEST_TRAIN_SPLIT = 0.8  # % of historical data to use for training
 
 # API settings
 API_HOST = '127.0.0.1'
@@ -103,7 +104,14 @@ LOG_FALSE_POSITIVES = True  # Log trades that never hit TP or SL
 MAX_TRADE_DURATION_MINUTES = 120  # Maximum trade duration in minutes before considering it a false positive
 
 # Machine Learning filter settings
-USE_ML_FILTER = False  # Disable ML filter temporarily until we have enough trades
+USE_ML_FILTER = False
+ML_MODEL_TYPE = "RandomForest"  # Model type: RandomForest or XGBoost
 ML_PROBABILITY_THRESHOLD = 0.5  # Lowered from 0.6 to be less restrictive
 ML_RETRAIN_FREQUENCY = 100  # Retrain ML model after this many new trades
-ML_MIN_TRADES_FOR_TRAINING = 30  # Lowered from 50 to enable ML sooner 
+ML_MIN_TRADES_FOR_TRAINING = 50  # Need at least 50 trades to train model
+
+# Performance Targets
+WIN_RATE_TARGET = 0.45  # Target win rate of 45%
+PF_TARGET = 1.4  # Target profit factor of 1.4
+DRAWDOWN_TARGET = 0.15  # Target max drawdown of 15%
+TRADES_PER_MONTH_TARGET = 10  # Target 10 trades per month per symbol 
