@@ -7,21 +7,45 @@ This module provides utility functions for calculating various trading and perfo
 # Minimum loss threshold to avoid division by very small numbers when calculating profit factor
 MIN_LOSS = 0.01  # USD
 
-def profit_factor(winners, losers):
+def profit_factor(wins, losses, min_loss=0.01, min_win_r=0.1):
     """
-    Calculate profit factor with a minimum loss threshold to prevent extremely high values.
-    
-    Profit factor = Gross Profit / Gross Loss
+    Calculate profit factor with stabilization for small losses and minimum win threshold.
     
     Args:
-        winners (list): List of winning trade amounts
-        losers (list): List of losing trade amounts (should be negative values)
-    
+        wins: List of winning trade profits
+        losses: List of losing trade losses (negative values)
+        min_loss: Minimum loss value to use (prevents division by zero)
+        min_win_r: Minimum R-multiple for a trade to count as a win
+        
     Returns:
-        float: Profit factor, or infinity if no losses
+        float: Profit Factor (gross profit / gross loss)
     """
-    gross_profit = sum(winners)
-    gross_loss = max(abs(sum(losers)), MIN_LOSS)  # Apply minimum loss threshold
+    # Filter out "scratch" trades that aren't meaningful wins
+    if min_win_r > 0 and losses:
+        # Calculate average_risk as average of absolute loss values
+        losses_abs = [abs(x) for x in losses]
+        avg_risk = sum(losses_abs) / len(losses_abs) if losses_abs else 1.0
+        
+        # If no losing trades, use mean of wins or default to 1.0
+        if not avg_risk:
+            avg_risk = np.mean(wins) if wins else 1.0
+        
+        # Filter wins that are at least min_win_r * avg_risk
+        meaningful_wins = [w for w in wins if w >= min_win_r * avg_risk]
+    else:
+        meaningful_wins = wins
+    
+    gross_profit = sum(meaningful_wins) if meaningful_wins else 0.0
+    gross_loss = sum(abs(x) for x in losses) if losses else 0.0
+    
+    # Apply minimum loss value to prevent division by zero or unrealistic PF
+    if gross_loss < min_loss:
+        gross_loss = min_loss
+    
+    # Return 0 if no profit to avoid misleading PF values
+    if gross_profit == 0:
+        return 0.0
+        
     return gross_profit / gross_loss
 
 

@@ -211,7 +211,7 @@ def test_strategy(config=None, args=None):
         # Later we'll run both strategies
         pass
     
-    strategy = strategy_factory.get_strategy(strategy_to_use)
+    strategy = strategy_factory.create_strategy(strategy_to_use)
     
     # Initialize backtester
     backtester = Backtester(data=df, initial_balance=initial_balance, params=strategy_config)

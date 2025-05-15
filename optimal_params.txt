@@ -1,0 +1,16 @@
+# Optimal Parameters
+EMA_FAST = 5
+EMA_SLOW = 15
+RSI_PERIOD = 14
+RSI_OVERSOLD = 35
+RSI_OVERBOUGHT = 65
+VOL_RATIO_MIN = 1.2
+MIN_BARS_BETWEEN_TRADES = 1
+
+# Performance Metrics
+Average Profit Factor: 1222.47
+Average Win Rate: 62.5%
+Average Return: -0.62%
+Average Trades Per Symbol: 3.5
+Maximum Drawdown: 4.74%
+Total Trades: 14

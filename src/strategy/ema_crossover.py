@@ -135,6 +135,9 @@ class EMACrossoverStrategy(BaseStrategy):
         logger.info(f"Finding optimal EMA parameters for {self.symbol} on {self.timeframe} timeframe...")
         
         try:
+            # Updated to use the new grid search-based optimizer
+            from src.strategy.ema_optimizer import find_best_ema_pair
+            
             fast, slow, stats = find_best_ema_pair(
                 symbol=self.symbol,
                 timeframe=self.timeframe,
@@ -148,8 +151,19 @@ class EMACrossoverStrategy(BaseStrategy):
                            f"Return: {stats['total_return']*100:.2f}%, "
                            f"Trades: {stats['total_trades']}")
                 
+                # Update strategy parameters
                 self.fast_ema = fast
                 self.slow_ema = slow
+                
+                # Get trend EMA and ATR multiplier if available
+                if isinstance(stats, dict) and 'trend_ema' in stats:
+                    if stats['trend_ema'] is not None:
+                        self.trend_ema = stats['trend_ema']
+                        logger.info(f"Using trend EMA: {self.trend_ema}")
+                
+                if isinstance(stats, dict) and 'atr_mult' in stats:
+                    self.atr_sl_multiplier = stats['atr_mult']
+                    logger.info(f"Using optimized ATR multiplier: {self.atr_sl_multiplier}")
             else:
                 logger.warning(f"No optimal EMA parameters found. Using defaults: EMA{self.fast_ema}/{self.slow_ema}")
         except Exception as e:
@@ -170,8 +184,13 @@ class EMACrossoverStrategy(BaseStrategy):
         # Apply EMA indicators to the data
         df_with_indicators = self.apply_indicators(df)
         
+        # Apply indicators to higher timeframe data if provided
+        higher_tf_with_indicators = None
+        if higher_tf_df is not None:
+            higher_tf_with_indicators = self.apply_indicators(higher_tf_df)
+        
         # Get the latest signal
-        signal = self.get_signal(df_with_indicators)
+        signal = self.get_signal(df_with_indicators, higher_tf_df=higher_tf_with_indicators)
         
         # Update active trade if exists
         if self.active_trade:
@@ -294,13 +313,14 @@ class EMACrossoverStrategy(BaseStrategy):
         
         return df
     
-    def get_signal(self, df, index=-1):
+    def get_signal(self, df, index=-1, higher_tf_df=None):
         """
         Generate trading signal based on the latest indicators.
         
         Args:
             df: DataFrame with OHLCV data
             index: Index to get signal for (-1 for latest)
+            higher_tf_df: Optional DataFrame with higher timeframe indicators
             
         Returns:
             str: Signal - "buy", "sell", or ""
@@ -359,6 +379,14 @@ class EMACrossoverStrategy(BaseStrategy):
                     else:
                         signal_type = ""  # Volume filter failed
                         signal_reasons.append(f"Volume too low: {volume_ratio:.2f}x < {self.volume_threshold}")
+                
+                # Apply dual-timeframe confirmation if provided
+                if signal_type and higher_tf_df is not None:
+                    if self.tf_confirm(signal_type, higher_tf_df):
+                        signal_reasons.append(f"Higher TF confirms uptrend")
+                    else:
+                        signal_type = ""  # Higher TF filter failed
+                        signal_reasons.append(f"Higher TF contradicts - no uptrend confirmation")
             
             # Check for sell signal - bearish crossover (fast EMA crosses below slow EMA)
             elif crossover_value == -1:
@@ -392,6 +420,14 @@ class EMACrossoverStrategy(BaseStrategy):
                     else:
                         signal_type = ""  # Volume filter failed
                         signal_reasons.append(f"Volume too low: {volume_ratio:.2f}x < {self.volume_threshold}")
+                
+                # Apply dual-timeframe confirmation if provided
+                if signal_type and higher_tf_df is not None:
+                    if self.tf_confirm(signal_type, higher_tf_df):
+                        signal_reasons.append(f"Higher TF confirms downtrend")
+                    else:
+                        signal_type = ""  # Higher TF filter failed
+                        signal_reasons.append(f"Higher TF contradicts - no downtrend confirmation")
         
         # Check if there was a recent trade (reduce overtrading)
         if signal_type and self.last_signal_time is not None:
@@ -534,7 +570,7 @@ class EMACrossoverStrategy(BaseStrategy):
             'pyramid_count': 0,
             'pyramid_levels': [],
             'trail_tightened': False,  # Flag to track if the trailing stop has been tightened
-            'regime': self.allocator.current_regime(self.symbol) if hasattr(self, 'allocator') else 'normal'  # Track market regime
+            'regime': getattr(self.allocator, 'current_regime', lambda x: 'normal')(self.symbol) if hasattr(self, 'allocator') and self.allocator is not None else 'normal'  # Track market regime
         }
         
         # Log the trade
@@ -606,6 +642,30 @@ class EMACrossoverStrategy(BaseStrategy):
         # Store R multiple in trade data
         trade['current_r'] = r_multiple
         
+        # Move to breakeven after 0.5R profit
+        trade.setdefault('moved_to_breakeven', False)
+        if r_multiple >= 0.5 and not trade['moved_to_breakeven']:
+            if trade['side'] == 'buy':
+                # Add small buffer (10% of ATR)
+                buffer = self.last_atr_value * 0.1 if self.last_atr_value else current_price * 0.001
+                new_stop = trade['entry_price'] + buffer
+                
+                # Only update if it would raise the stop
+                if trade['stop_loss'] < new_stop:
+                    trade['stop_loss'] = new_stop
+                    trade['moved_to_breakeven'] = True
+                    logger.info(f"Moved stop loss to breakeven+ at {new_stop:.2f} after reaching {r_multiple:.2f}R profit")
+            else:  # sell/short position
+                # Add small buffer (10% of ATR)
+                buffer = self.last_atr_value * 0.1 if self.last_atr_value else current_price * 0.001
+                new_stop = trade['entry_price'] - buffer
+                
+                # Only update if it would lower the stop
+                if trade['stop_loss'] > new_stop:
+                    trade['stop_loss'] = new_stop
+                    trade['moved_to_breakeven'] = True
+                    logger.info(f"Moved stop loss to breakeven+ at {new_stop:.2f} after reaching {r_multiple:.2f}R profit")
+                    
         # Calculate R-based profit relative to ATR (for trailing stop tightening)
         if 'atr' in trade:
             atr_entry = trade['atr']
@@ -635,15 +695,15 @@ class EMACrossoverStrategy(BaseStrategy):
         if r_multiple >= 2.0:
             # When profit >= 2R, use even tighter trailing (0.5 × ATR)
             trail_multiplier = 0.5
-        elif r_multiple >= 1.0:
-            # When profit >= 1R, use tighter trailing (0.75 × ATR)
+        elif r_multiple >= 1.5:
+            # When profit >= 1.5R, use tighter trailing (0.75 × ATR)
             trail_multiplier = 0.75
-        elif r_multiple >= 0.5:
-            # When profit >= 0.5R, use normal trailing (1.0 × ATR)
+        elif r_multiple >= 1.0:
+            # When profit >= 1R, use normal trailing (1.0 × ATR)
             trail_multiplier = 1.0
         else:
-            # Default trailing stop multiplier
-            trail_multiplier = ATR_TRAIL_START
+            # Default trailing stop multiplier - wider to let trades breathe
+            trail_multiplier = self.atr_trail_multiplier  # Default is 1.25
         
         # Update max/min price seen for trailing stop calculations
         if trade['side'] == 'buy':
@@ -1104,4 +1164,34 @@ class EMACrossoverStrategy(BaseStrategy):
             self.last_signal_time = current_time
             return 'sell'
         
-        return '' 
+        return ''
+    
+    def tf_confirm(self, signal_type, higher_tf_df):
+        """
+        Check if higher timeframe confirms the signal direction.
+        Simplified to only check slow EMA trend alignment.
+        
+        Args:
+            signal_type: The proposed signal ('buy' or 'sell')
+            higher_tf_df: DataFrame with higher timeframe indicators
+            
+        Returns:
+            bool: True if higher timeframe confirms the signal, False otherwise
+        """
+        if higher_tf_df is None or len(higher_tf_df) < 2:
+            # No higher timeframe data available, bypass confirmation
+            return True
+            
+        # Get the latest higher timeframe data
+        latest_row = higher_tf_df.iloc[-1]
+        prev_row = higher_tf_df.iloc[-2]
+        
+        # For buy signals: check if higher timeframe slow EMA is rising
+        if signal_type == 'buy':
+            return latest_row['ema_slow'] > prev_row['ema_slow']
+        
+        # For sell signals: check if higher timeframe slow EMA is falling
+        elif signal_type == 'sell':
+            return latest_row['ema_slow'] < prev_row['ema_slow']
+        
+        return False 

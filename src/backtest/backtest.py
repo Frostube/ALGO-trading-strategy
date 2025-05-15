@@ -9,12 +9,13 @@ import importlib
 
 from src.data.fetcher import DataFetcher
 from src.indicators.technical import apply_indicators, get_signal
+from src.utils.metrics import profit_factor
 from src.config import (
     SYMBOL, STOP_LOSS_PCT, TAKE_PROFIT_PCT, COMMISSION,
     SLIPPAGE, BACKTEST_TRAIN_SPLIT, RISK_PER_TRADE, USE_ATR_STOPS, ATR_SL_MULTIPLIER, ATR_TP_MULTIPLIER,
     HIGHER_TIMEFRAME, TIMEFRAME, EMA_TREND, EMA_SLOW, EMA_FAST,
     TRAIL_ACTIVATION_PCT, TRAIL_ATR_MULTIPLIER, USE_ML_FILTER, ML_MIN_TRADES_FOR_TRAINING,
-    RSI_PERIOD, RSI_LONG_THRESHOLD, RSI_SHORT_THRESHOLD, VOLUME_PERIOD, VOLUME_THRESHOLD,
+    RSI_PERIOD, RSI_OVERSOLD, RSI_OVERBOUGHT, VOLUME_PERIOD, VOL_RATIO_MIN,
     ATR_PERIOD
 )
 from src.utils.logger import logger
@@ -192,7 +193,7 @@ class Backtester:
         results: Dictionary of backtest results
     """
     
-    def __init__(self, data=None, initial_balance=10000, params=None):
+    def __init__(self, data=None, initial_balance=10000, params=None, open_positions=None):
         self.data = data
         self.initial_balance = initial_balance
         self.cash = initial_balance
@@ -206,6 +207,10 @@ class Backtester:
         # Trading costs
         self.COMMISSION = 0.0004   # 0.04%
         self.SLIPPAGE = 0.0002     # 0.02%
+        
+        # IMPROVEMENT 3: Track open positions to prevent overlap
+        self.open_positions = open_positions if open_positions is not None else {}
+        self.current_symbol = None
     
     def run(self, train_test_split=None, symbols=None, strategies=None):
         """
@@ -235,7 +240,7 @@ class Backtester:
         
         # Get strategies from factory
         strategy_factory = StrategyFactory(self.params)
-        strategy_instances = [strategy_factory.get_strategy(name) for name in strategies]
+        strategy_instances = [strategy_factory.create_strategy(name) for name in strategies]
         
         # Initialize allocator if using multiple symbols/strategies
         if len(symbols) > 1 or len(strategy_instances) > 1:
@@ -311,32 +316,37 @@ class Backtester:
     
     def _run_single_strategy(self, strategy, data, train_test_split=None):
         """
-        Run a single strategy against provided data.
+        Run backtest for a given strategy.
         
         Args:
             strategy: Strategy instance
-            data: DataFrame with OHLCV data
-            train_test_split: Ratio to split data (None for no split)
+            data: DataFrame with price data
+            train_test_split: Optional tuple with (train_start, train_end, test_start, test_end)
             
         Returns:
-            dict: Results dictionary or dict of train/test results
+            dict: Backtest results
         """
-        if train_test_split:
-            # Split the data
-            split_idx = int(len(data) * train_test_split)
-            train_data = data.iloc[:split_idx].copy()
-            test_data = data.iloc[split_idx:].copy()
+        # Check if we should do train/test split
+        if train_test_split is not None:
+            train_start, train_end, test_start, test_end = train_test_split
             
-            # Run on train set
-            logger.info(f"Running {strategy.name} on training set ({len(train_data)} candles)")
+            # Extract train/test data
+            train_data = data[(data.index >= train_start) & (data.index <= train_end)]
+            test_data = data[(data.index >= test_start) & (data.index <= test_end)]
+            
+            # Run on train data
+            logger.info(f"Running {strategy.name} on training data ({len(train_data)} candles)")
             train_results = self._backtest_strategy(strategy, train_data)
             
-            # Reset strategy and run on test set
-            strategy.reset()
-            logger.info(f"Running {strategy.name} on testing set ({len(test_data)} candles)")
+            # Retrain strategy if it has a fit method
+            if hasattr(strategy, 'fit'):
+                logger.info(f"Retraining {strategy.name} on full training data")
+                strategy.fit(train_data)
+            
+            # Run on test data
+            logger.info(f"Running {strategy.name} on test data ({len(test_data)} candles)")
             test_results = self._backtest_strategy(strategy, test_data)
             
-            # Combine results
             return {
                 'train': train_results,
                 'test': test_results
@@ -346,17 +356,25 @@ class Backtester:
             logger.info(f"Running {strategy.name} on full dataset ({len(data)} candles)")
             return self._backtest_strategy(strategy, data)
     
-    def _backtest_strategy(self, strategy, data):
+    def _backtest_strategy(self, strategy, data, higher_tf_df=None):
         """
         Run backtest for a single strategy on provided data.
         
         Args:
             strategy: Strategy instance to test
             data: DataFrame with price data
+            higher_tf_df: Optional DataFrame with higher timeframe data for dual-timeframe confirmation
             
         Returns:
             dict: Backtest results
         """
+        # Set the symbol for position tracking
+        if hasattr(strategy, 'symbol'):
+            self.current_symbol = strategy.symbol
+            # Initialize position tracking for this symbol if not exists
+            if self.current_symbol not in self.open_positions:
+                self.open_positions[self.current_symbol] = None
+                
         # Make sure there's enough data
         if len(data) < 20:
             logger.warning("Insufficient data for backtest (min 20 candles required)")
@@ -375,6 +393,11 @@ class Backtester:
         # Initialize strategy with account
         strategy.set_account(account)
         data_with_indicators = strategy.apply_indicators(data)
+        
+        # Apply indicators to higher timeframe data if provided
+        higher_tf_with_indicators = None
+        if higher_tf_df is not None:
+            higher_tf_with_indicators = strategy.apply_indicators(higher_tf_df)
         
         # Initialize tracking variables
         trades = []
@@ -397,13 +420,38 @@ class Backtester:
         logger.info(f"Starting backtest loop with {len(data_with_indicators) - min_required_candles} candles")
         
         for i in range(min_required_candles, len(data_with_indicators)):
+            # IMPROVEMENT 3: Skip if there's already an open position for this symbol
+            # with a different strategy (prevent overlap)
+            if (self.current_symbol in self.open_positions and 
+                self.open_positions[self.current_symbol] is not None and
+                self.open_positions[self.current_symbol]['strategy'] != strategy.__class__.__name__):
+                if position_qty == 0:  # Only log once per potential entry
+                    logger.info(f"Skipping signal at {data_with_indicators.index[i]} - another strategy has an open position on {self.current_symbol}")
+                continue
+                
             # Get the current bar data
             current_data = data_with_indicators.iloc[:i+1]
             current_bar = current_data.iloc[-1]
             timestamp = current_data.index[-1]
             
-            # Generate signal
-            signal = strategy.get_signal(current_data)
+            # Get current higher timeframe data if available
+            current_higher_tf = None
+            if higher_tf_with_indicators is not None:
+                # Get the higher timeframe data up to the current timestamp
+                current_higher_tf = higher_tf_with_indicators[higher_tf_with_indicators.index <= timestamp]
+                if len(current_higher_tf) > 0:
+                    current_higher_tf = current_higher_tf.copy()
+                else:
+                    current_higher_tf = None
+            
+            # Generate signal using dual-timeframe confirmation if available
+            if hasattr(strategy, 'update') and current_higher_tf is not None:
+                strategy_state = strategy.update(current_data, current_higher_tf)
+                signal = strategy_state.get('signal', '')
+            else:
+                # Fall back to simple signal generation
+                signal = strategy.get_signal(current_data)
+                
             signal_count[signal] += 1
             
             # Track strategy state
@@ -542,7 +590,12 @@ class Backtester:
         if len(trades) > 0:
             returns = [t['pct_return'] for t in trades]
             win_rate = sum(1 for t in trades if t['pnl'] > 0) / len(trades)
-            profit_factor = sum(t['pnl'] for t in trades if t['pnl'] > 0) / (abs(sum(t['pnl'] for t in trades if t['pnl'] < 0)) + 1e-6)
+            
+            # Use the new utility function for profit factor calculation
+            winners = [t['pnl'] for t in trades if t['pnl'] > 0]
+            losers = [t['pnl'] for t in trades if t['pnl'] <= 0]
+            pf = profit_factor(winners, losers)
+            
             avg_win = sum(t['pnl'] for t in trades if t['pnl'] > 0) / (sum(1 for t in trades if t['pnl'] > 0) + 1e-6)
             avg_loss = sum(t['pnl'] for t in trades if t['pnl'] < 0) / (sum(1 for t in trades if t['pnl'] < 0) + 1e-6)
             
@@ -580,7 +633,7 @@ class Backtester:
             # No trades case
             returns = []
             win_rate = 0
-            profit_factor = 0
+            pf = 0
             avg_win = 0
             avg_loss = 0
             annual_return = 0
@@ -596,7 +649,7 @@ class Backtester:
             'sharpe_ratio': sharpe,
             'max_drawdown': max_dd,
             'win_rate': win_rate,
-            'profit_factor': profit_factor,
+            'profit_factor': pf,
             'avg_win': avg_win,
             'avg_loss': avg_loss,
             'total_trades': len(trades),
@@ -748,19 +801,21 @@ class Backtester:
             # Calculate win rate and profit factor
             if all_trades:
                 win_rate = sum(1 for t in all_trades if t['pnl'] > 0) / len(all_trades)
-                profit_sum = sum(t['pnl'] for t in all_trades if t['pnl'] > 0)
-                loss_sum = abs(sum(t['pnl'] for t in all_trades if t['pnl'] < 0)) + 1e-6
-                profit_factor = profit_sum / loss_sum
+                
+                # Use the new utility function for profit factor calculation
+                winners = [t['pnl'] for t in all_trades if t['pnl'] > 0]
+                losers = [t['pnl'] for t in all_trades if t['pnl'] <= 0]
+                profit_factor_val = profit_factor(winners, losers)
             else:
                 win_rate = 0
-                profit_factor = 0
+                profit_factor_val = 0
         else:
             total_return = 0
             max_dd = 0
             sharpe = 0
             annual_return = 0
             win_rate = 0
-            profit_factor = 0
+            profit_factor_val = 0
         
         # Create portfolio results
         portfolio_results = {
@@ -769,7 +824,7 @@ class Backtester:
             'sharpe_ratio': sharpe,
             'max_drawdown': max_dd,
             'win_rate': win_rate,
-            'profit_factor': profit_factor,
+            'profit_factor': profit_factor_val,
             'total_trades': len(all_trades),
             'trades': all_trades,
             'equity_curve': combined_equity,
