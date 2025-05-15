@@ -9,6 +9,20 @@ The EMA grid optimization is now running in the background for:
 
 This process will generate optimized parameter files in the `params/` directory that will be automatically used by the trading strategy.
 
+## ✅ Implemented: Volatility Regime Switch
+
+The volatility regime switch has been successfully implemented. This feature:
+
+- Classifies markets into QUIET, NORMAL, and EXPLOSIVE volatility regimes
+- Adjusts risk parameters based on current market conditions
+- Enables pyramiding only in high-volatility environments
+- Adapts strategy parameters to different market conditions
+
+You can test the volatility regime monitor by running:
+```
+python check_volatility_regimes.py --symbols "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT" --plot
+```
+
 ## Testing the Optimized Parameters
 
 Once the grid search completes, run:
@@ -19,36 +33,7 @@ Once the grid search completes, run:
 
 This will execute a backtest using the optimized parameters across all symbols.
 
-## Next Edge Upgrades
-
-### Option 1: Realized Volatility Regime Switch
-
-The volatility regime switch is now ready for implementation. To activate it:
-
-1. Copy the code from `src/risk/vol_regime_switch.py` to your portfolio manager
-2. Make these changes to your existing portfolio manager:
-
-```python
-# --- In PortfolioManager.__init__ ---
-self.vol_monitor = VolatilityRegimeMonitor(lookback_days=30)
-self.base_risk = MAX_RISK_PER_TRADE  # Store base risk for scaling
-
-# --- In calculate_position_size method ---
-# Replace fixed risk_pct with dynamic risk
-risk_pct = self.current_risk_pct(symbol)
-
-# --- In allocate_capital method ---
-# Add regime check for pyramiding
-strategy.enable_pyramiding = self.vol_monitor.should_enable_pyramiding(symbol)
-```
-
-3. Test the volatility regime monitor:
-
-```
-python check_volatility_regimes.py --symbols "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT" --plot
-```
-
-### Option 2: Fee & Funding Cost Model
+## Next Edge Upgrade: Fee & Funding Cost Model
 
 The fee and funding model is ready for implementation:
 
@@ -90,20 +75,12 @@ print(f"Funding Cost: ${backtest_results['funding_cost']:.2f} ({backtest_results
 print(f"Net P&L: ${backtest_results['net_pnl']:.2f}")
 ```
 
-## Recommended Order of Implementation
-
-1. **First**: Complete the EMA grid optimization (already running)
-2. **Second**: Implement the volatility regime switch (higher expected impact)
-3. **Third**: Add the fee & funding model (critical before going live)
-
-This order maximizes the chance of reaching the 10-30% per quarter target before accounting for costs.
-
 ## Commit Changes
 
 After all implementations are complete:
 
 ```
 git add .
-git commit -m "Added EMA grid optimization, volatility regime switch, and fee model"
+git commit -m "Added volatility regime switch and EMA grid optimization"
 git push
 ``` 

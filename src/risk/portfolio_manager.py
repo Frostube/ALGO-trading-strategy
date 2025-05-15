@@ -13,6 +13,7 @@ import json
 
 from src.utils.logger import logger
 from src.data.fetcher import fetch_ohlcv
+from src.risk.vol_regime_switch import VolatilityRegimeMonitor
 
 # Edge-weighted position sizing configuration
 # Strategies with profit factor >= pf_hi will use risk_hi, others use risk_lo
@@ -53,6 +54,7 @@ class PortfolioRiskManager:
         """
         self.account_equity = account_equity
         self.risk_per_trade = risk_per_trade
+        self.base_risk = risk_per_trade  # Store base risk for scaling
         self.max_pos_pct = max_pos_pct
         self.max_portfolio_risk = max_portfolio_risk
         self.max_correlated_risk = max_correlated_risk
@@ -61,6 +63,7 @@ class PortfolioRiskManager:
         self.cache_dir = cache_dir
         self.vol_cache = {}  # Cache for realized volatility calculations
         self.regime_cache = {}  # Cache for market regime classifications
+        self.vol_monitor = VolatilityRegimeMonitor(lookback_days=30)
         
         self._ensure_cache_dir()
         
@@ -225,10 +228,28 @@ class PortfolioRiskManager:
         Returns:
             bool: True if pyramiding should be enabled
         """
-        regime = self.current_regime(symbol)
+        # Use the volatility monitor to determine if pyramiding should be enabled
+        return self.vol_monitor.should_enable_pyramiding(symbol)
+    
+    def current_risk_pct(self, symbol):
+        """
+        Get the current risk percentage based on volatility regime.
         
-        # Enable pyramiding only in volatile markets
-        return regime == "storm"
+        Args:
+            symbol: Trading pair symbol
+            
+        Returns:
+            float: Risk percentage adjusted for current market regime
+        """
+        # Get base risk adjustment from volatility monitor
+        risk_adjustment = self.vol_monitor.get_risk_adjustment(symbol)
+        
+        # Apply adjustment to base risk
+        adjusted_risk = self.base_risk * risk_adjustment
+        
+        logger.debug(f"Risk adjustment for {symbol}: {risk_adjustment} × {self.base_risk:.4f} = {adjusted_risk:.4f}")
+        
+        return adjusted_risk
     
     def calculate_position_size(self, symbol, current_price, atr_value, strat_name="generic", pf_recent=1.0, side=None):
         """
@@ -245,8 +266,15 @@ class PortfolioRiskManager:
         Returns:
             float: Position size in base currency units
         """
-        # Step 1: Calculate base risk percentage based on strategy edge
-        risk_pct = self.dynamic_risk_pct(strat_name, pf_recent)
+        # Step 1: Calculate base risk percentage based on strategy edge and current regime
+        risk_pct = self.current_risk_pct(symbol)
+        
+        # If we have profit factor data, further adjust based on edge
+        if pf_recent > 0:
+            cfg = EDGE_WEIGHTS.get(strat_name, None)
+            if cfg is not None and pf_recent >= cfg["pf_hi"]:
+                # Boost risk for strategies with proven edge
+                risk_pct = max(risk_pct, cfg["risk_hi"])
         
         # Step 2: Calculate dollar risk amount
         dollar_risk = self.account_equity * risk_pct
@@ -458,4 +486,31 @@ class PortfolioRiskManager:
                           f"Total would be: ${total_risk:.2f} > ${max_risk:.2f} max")
             logger.info("Queued signal – risk cap hit")
         
-        return can_open 
+        return can_open
+    
+    def allocate_capital(self, strategy, symbols, available_capital):
+        """
+        Allocate capital across multiple symbols based on volatility and opportunity.
+        
+        Args:
+            strategy: Trading strategy instance
+            symbols: List of symbols to trade
+            available_capital: Capital available for allocation
+            
+        Returns:
+            dict: Capital allocation by symbol
+        """
+        allocations = {}
+        
+        for symbol in symbols:
+            # Update regime for this symbol if we have data
+            if hasattr(strategy, 'data') and symbol in strategy.data:
+                self.vol_monitor.update_regime(symbol, strategy.data[symbol])
+                
+            # Set strategy parameters based on current regime
+            strategy.enable_pyramiding = self.should_enable_pyramiding(symbol)
+            
+            # Allocate based on opportunity score and volatility
+            allocations[symbol] = available_capital / len(symbols)  # Equal allocation for now
+        
+        return allocations 
