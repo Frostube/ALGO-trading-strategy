@@ -477,6 +477,14 @@ class EMACrossoverStrategy(BaseStrategy):
                     pf_recent=pf_recent,
                     side=side
                 )
+                
+                # Check if pyramiding should be enabled based on volatility regime
+                if hasattr(self, 'allocator') and hasattr(self.allocator, 'should_enable_pyramiding'):
+                    self.enable_pyramiding = self.allocator.should_enable_pyramiding(self.symbol)
+                    if self.enable_pyramiding:
+                        logger.info(f"Pyramiding ENABLED for {self.symbol} based on volatility regime")
+                    else:
+                        logger.info(f"Pyramiding DISABLED for {self.symbol} based on volatility regime")
             elif 'atr' in bar_data and not pd.isna(bar_data['atr']) and hasattr(self, 'use_volatility_sizing') and self.use_volatility_sizing:
                 # Volatility-targeted position sizing
                 dollar_risk = self.account_balance * self.vol_target_pct  # Target volatility (0.75%)
@@ -525,7 +533,8 @@ class EMACrossoverStrategy(BaseStrategy):
             'min_price': current_price if side == 'sell' else 0,  # Track min price for trailing stop (short)
             'pyramid_count': 0,
             'pyramid_levels': [],
-            'trail_tightened': False  # Flag to track if the trailing stop has been tightened
+            'trail_tightened': False,  # Flag to track if the trailing stop has been tightened
+            'regime': self.allocator.current_regime(self.symbol) if hasattr(self, 'allocator') else 'normal'  # Track market regime
         }
         
         # Log the trade
@@ -560,7 +569,7 @@ class EMACrossoverStrategy(BaseStrategy):
         logger.info(f"Opened {side} trade at {current_price} with SL: {stop_loss_price}" + 
                    (f", TP: {take_profit_price}" if take_profit_price else ", using trailing stop"))
         logger.info(f"Strategy parameters: EMA{self.fast_ema}/{self.slow_ema}/{self.trend_ema}, " +
-                   f"ATR: {bar_data.get('atr', None):.2f}")
+                   f"ATR: {bar_data.get('atr', None):.2f}, Regime: {self.active_trade['regime']}")
         
         return self.active_trade
     
@@ -710,6 +719,14 @@ class EMACrossoverStrategy(BaseStrategy):
             trade['pyramid_levels'] = []
         
         if trade['pyramid_count'] >= self.max_pyramid_entries:
+            return
+        
+        # Check if pyramiding is disabled based on volatility regime
+        if hasattr(self, 'allocator') and hasattr(self.allocator, 'should_enable_pyramiding'):
+            if not self.allocator.should_enable_pyramiding(self.symbol):
+                logger.info(f"Skipping pyramid opportunity - pyramiding disabled in current regime ({trade.get('regime', 'normal')})")
+                return
+        elif not self.enable_pyramiding:
             return
         
         # Calculate profit threshold for adding to position

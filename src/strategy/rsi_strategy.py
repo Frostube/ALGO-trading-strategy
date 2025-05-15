@@ -335,6 +335,11 @@ class RSIOscillatorStrategy(BaseStrategy):
         """
         logger.info(f"RSI Strategy executed {trade_type} trade at {entry_price}, size: {position_size}")
         
+        # Get current market regime if portfolio manager is available
+        market_regime = 'normal'
+        if hasattr(self, 'portfolio_mgr') and hasattr(self.portfolio_mgr, 'current_regime'):
+            market_regime = self.portfolio_mgr.current_regime(self.symbol)
+        
         # Set active trade
         self.active_trade = {
             'symbol': self.symbol,
@@ -344,7 +349,8 @@ class RSIOscillatorStrategy(BaseStrategy):
             'amount': position_size,
             'atr': self.last_atr_value if hasattr(self, 'last_atr_value') else None,
             'trailing_stop': None,
-            'trail_tightened': False  # Track if the trail has been tightened
+            'trail_tightened': False,  # Track if the trail has been tightened
+            'regime': market_regime  # Track the market regime
         }
     
     def on_trade_exit(self, trade_type, entry_price, exit_price, position_size, pnl, timestamp=None):
@@ -549,6 +555,12 @@ class RSIOscillatorStrategy(BaseStrategy):
                 pf_recent=pf_recent
             )
             
+            # Get the current market regime
+            market_regime = 'normal'
+            if hasattr(self.portfolio_mgr, 'current_regime'):
+                market_regime = self.portfolio_mgr.current_regime(self.symbol)
+                logger.info(f"Current market regime for {self.symbol}: {market_regime}")
+            
             # Store stop loss and take profit levels for the trade
             if signal == 'buy':
                 stop_loss = current_price - (self.last_atr_value * self.atr_sl_multiplier)
@@ -566,7 +578,8 @@ class RSIOscillatorStrategy(BaseStrategy):
                 'stop_loss': stop_loss,
                 'take_profit': take_profit,
                 'atr': self.last_atr_value,
-                'trail_tightened': False
+                'trail_tightened': False,
+                'regime': market_regime  # Store the market regime
             }
             
             # Call trade execution handler
@@ -579,6 +592,9 @@ class RSIOscillatorStrategy(BaseStrategy):
             
             # Update the active trade with all the details
             self.active_trade.update(trade)
+            
+            # Log the trade with regime information
+            logger.info(f"Opened {signal} trade in {market_regime.upper()} regime: {qty} units at {current_price}")
             
         return signal
 

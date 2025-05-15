@@ -12,6 +12,7 @@ from pathlib import Path
 import json
 
 from src.utils.logger import logger
+from src.data.fetcher import fetch_ohlcv
 
 # Edge-weighted position sizing configuration
 # Strategies with profit factor >= pf_hi will use risk_hi, others use risk_lo
@@ -19,6 +20,10 @@ EDGE_WEIGHTS = {
     "ema_crossover": {"pf_hi": 1.2, "risk_hi": 0.010, "risk_lo": 0.005},
     "rsi_oscillator": {"pf_hi": 1.2, "risk_hi": 0.012, "risk_lo": 0.007},
 }
+
+# Volatility regime thresholds
+VOL_CALM = 0.03  # 3% realized volatility threshold for calm markets
+VOL_STORM = 0.06  # 6% realized volatility threshold for volatile markets
 
 class PortfolioRiskManager:
     """
@@ -31,268 +36,309 @@ class PortfolioRiskManager:
     - Edge-weighted position sizing based on recent performance
     """
     
-    def __init__(self, account_equity, max_portfolio_risk=0.015, risk_per_trade=0.0075,
-                 max_position_pct=0.20, vol_lookback=30):
+    def __init__(self, account_equity=10000.0, risk_per_trade=0.01, 
+                 max_pos_pct=0.2, max_portfolio_risk=0.05, max_correlated_risk=0.08,
+                 use_volatility_sizing=True, cache_dir="data"):
         """
         Initialize the portfolio risk manager.
         
         Args:
             account_equity: Total account equity
-            max_portfolio_risk: Maximum total portfolio risk (default: 0.015 = 1.5%)
-            risk_per_trade: Risk per trade as fraction of equity (default: 0.0075 = 0.75%)
-            max_position_pct: Maximum position size as fraction of equity (default: 0.20 = 20%)
-            vol_lookback: Days to look back for volatility calculation (default: 30)
+            risk_per_trade: Default risk per trade (% of equity)
+            max_pos_pct: Maximum position size (% of equity)
+            max_portfolio_risk: Maximum total portfolio risk (% of equity)
+            max_correlated_risk: Maximum risk for correlated assets (% of equity)
+            use_volatility_sizing: Whether to size positions based on volatility
+            cache_dir: Directory to cache market data
         """
         self.account_equity = account_equity
-        self.max_portfolio_risk = max_portfolio_risk
         self.risk_per_trade = risk_per_trade
-        self.max_position_pct = max_position_pct
-        self.vol_lookback = vol_lookback
-        
-        # Active positions dictionary: {symbol: position_data}
+        self.max_pos_pct = max_pos_pct
+        self.max_portfolio_risk = max_portfolio_risk
+        self.max_correlated_risk = max_correlated_risk
+        self.use_volatility_sizing = use_volatility_sizing
         self.active_positions = {}
+        self.cache_dir = cache_dir
+        self.vol_cache = {}  # Cache for realized volatility calculations
+        self.regime_cache = {}  # Cache for market regime classifications
         
-        # Volatility regimes for each symbol: {symbol: regime_data}
-        self.volatility_regimes = {}
+        self._ensure_cache_dir()
         
         logger.info(f"Portfolio risk manager initialized with equity ${account_equity}, "
                    f"max risk {max_portfolio_risk*100:.2f}%, "
                    f"trade risk {risk_per_trade*100:.2f}%, "
-                   f"max position {max_position_pct*100:.2f}%")
+                   f"max position {max_pos_pct*100:.2f}%")
     
-    def update_account_equity(self, new_equity):
-        """Update the account equity value."""
-        self.account_equity = new_equity
+    def _ensure_cache_dir(self):
+        """Ensure the cache directory exists"""
+        cache_path = Path(self.cache_dir)
+        if not cache_path.exists():
+            cache_path.mkdir(parents=True)
+    
+    def get_available_risk(self):
+        """
+        Calculate available risk capacity based on current positions.
+        
+        Returns:
+            float: Available risk as percentage of equity
+        """
+        current_risk = sum(pos['risk_allocation'] for pos in self.active_positions.values())
+        return max(0, self.max_portfolio_risk - current_risk)
     
     def dynamic_risk_pct(self, strat_name, pf_recent):
         """
-        Calculate dynamic risk percentage based on strategy's recent performance.
+        Calculate dynamic risk percentage based on strategy edge (profit factor).
         
         Args:
-            strat_name: Strategy name ('ema_crossover', 'rsi_oscillator', etc.)
-            pf_recent: Recent profit factor from health monitor
+            strat_name: Strategy name ('ema_crossover' or 'rsi_oscillator')
+            pf_recent: Recent profit factor (e.g., last 40 trades)
             
         Returns:
-            float: Risk percentage to use for position sizing
+            float: Risk percentage (0.01 = 1% of equity)
         """
         cfg = EDGE_WEIGHTS.get(strat_name, None)
         if cfg is None:
-            return self.risk_per_trade  # Default if strategy not in config
-        
-        # Use higher risk for strategies with good recent performance
+            return self.risk_per_trade  # default
         return cfg["risk_hi"] if pf_recent >= cfg["pf_hi"] else cfg["risk_lo"]
     
-    def calculate_position_size(self, symbol, current_price, atr_value, strat_name=None, pf_recent=None, side='long'):
+    def calculate_realized_volatility(self, symbol, lookback=30, timeframe="1d"):
         """
-        Calculate the position size for a new trade based on volatility-targeted risk
-        and dynamic edge-based position sizing.
+        Calculate realized volatility over a specified lookback period.
+        
+        Args:
+            symbol: Trading pair symbol (e.g., 'BTC/USDT')
+            lookback: Lookback period in days
+            timeframe: Data timeframe
+            
+        Returns:
+            float: Realized volatility as a decimal (e.g., 0.05 = 5%)
+        """
+        # Check cache first
+        cache_key = f"{symbol}_{lookback}_{timeframe}"
+        if cache_key in self.vol_cache:
+            cache_time, vol = self.vol_cache[cache_key]
+            # Use cached value if less than 4 hours old
+            if (datetime.now() - cache_time).total_seconds() < 14400:  # 4 hours
+                return vol
+        
+        try:
+            # Fetch data
+            df = fetch_ohlcv(symbol, timeframe, days=lookback+5)  # Add buffer days
+            
+            if df is None or len(df) < lookback:
+                logger.warning(f"Insufficient data for volatility calculation: {symbol}")
+                return 0.05  # Default to 5% if data insufficient
+            
+            # Calculate daily returns
+            df['return'] = df['close'].pct_change()
+            
+            # Calculate annualized volatility
+            daily_vol = df['return'].std()
+            
+            # Convert to period volatility based on timeframe
+            if timeframe == "1d":
+                period_vol = daily_vol
+            elif timeframe == "4h":
+                period_vol = daily_vol * np.sqrt(6)  # 6 4-hour periods in a day
+            elif timeframe == "1h":
+                period_vol = daily_vol * np.sqrt(24)  # 24 hours in a day
+            else:
+                # Default to daily
+                period_vol = daily_vol
+            
+            # Cache the result
+            self.vol_cache[cache_key] = (datetime.now(), period_vol)
+            
+            return period_vol
+            
+        except Exception as e:
+            logger.error(f"Error calculating volatility for {symbol}: {str(e)}")
+            return 0.05  # Default to 5% if calculation fails
+    
+    def current_regime(self, symbol, lookback=30):
+        """
+        Determine the current market regime based on realized volatility.
+        
+        Args:
+            symbol: Trading pair symbol
+            lookback: Lookback period in days
+            
+        Returns:
+            str: Market regime ('calm', 'normal', or 'storm')
+        """
+        # Check cache first
+        cache_key = f"{symbol}_{lookback}"
+        if cache_key in self.regime_cache:
+            cache_time, regime = self.regime_cache[cache_key]
+            # Use cached value if less than 4 hours old
+            if (datetime.now() - cache_time).total_seconds() < 14400:  # 4 hours
+                return regime
+        
+        # Calculate realized volatility
+        vol = self.calculate_realized_volatility(symbol, lookback)
+        
+        # Determine regime
+        if vol < VOL_CALM:
+            regime = "calm"
+        elif vol > VOL_STORM:
+            regime = "storm"
+        else:
+            regime = "normal"
+        
+        # Cache the result
+        self.regime_cache[cache_key] = (datetime.now(), regime)
+        
+        logger.info(f"Market regime for {symbol}: {regime.upper()} (vol={vol:.2%})")
+        
+        return regime
+    
+    def adjust_size_for_regime(self, base_qty, symbol):
+        """
+        Adjust position size based on current market regime.
+        
+        Args:
+            base_qty: Base position size
+            symbol: Trading pair symbol
+            
+        Returns:
+            float: Adjusted position size
+        """
+        regime = self.current_regime(symbol)
+        
+        if regime == "calm":
+            # Reduce position size in calm markets
+            return base_qty * 0.5
+        elif regime == "storm":
+            # Keep full size in volatile markets
+            return base_qty
+        else:
+            # Normal market conditions
+            return base_qty * 0.75
+    
+    def should_enable_pyramiding(self, symbol):
+        """
+        Determine if pyramiding should be enabled based on current market regime.
+        
+        Args:
+            symbol: Trading pair symbol
+            
+        Returns:
+            bool: True if pyramiding should be enabled
+        """
+        regime = self.current_regime(symbol)
+        
+        # Enable pyramiding only in volatile markets
+        return regime == "storm"
+    
+    def calculate_position_size(self, symbol, current_price, atr_value, strat_name="generic", pf_recent=1.0, side=None):
+        """
+        Calculate optimal position size based on risk parameters and market conditions.
         
         Args:
             symbol: Trading pair symbol
             current_price: Current market price
-            atr_value: ATR value in price units
-            strat_name: Strategy name for edge-weighted sizing
-            pf_recent: Recent profit factor for the strategy
-            side: Trade direction ('long' or 'short')
+            atr_value: ATR value for volatility sizing
+            strat_name: Strategy name for dynamic risk allocation
+            pf_recent: Recent profit factor for edge-weighted sizing
+            side: Trade direction ('buy' or 'sell')
             
         Returns:
-            tuple: (quantity, notional_value, can_open) - position quantity, 
-                   notional value, and whether the position can be opened
+            float: Position size in base currency units
         """
-        # Calculate risk percentage - use dynamic risk if strategy info provided
-        if strat_name and pf_recent is not None:
-            risk_pct = self.dynamic_risk_pct(strat_name, pf_recent)
-            logger.info(f"Using dynamic risk for {strat_name}: {risk_pct*100:.3f}% (PF={pf_recent:.2f})")
-        else:
-            risk_pct = self.risk_per_trade
+        # Step 1: Calculate base risk percentage based on strategy edge
+        risk_pct = self.dynamic_risk_pct(strat_name, pf_recent)
         
-        # Calculate risk in dollar terms
+        # Step 2: Calculate dollar risk amount
         dollar_risk = self.account_equity * risk_pct
         
-        # Calculate price volatility
-        atr_pct = atr_value / current_price
+        # Step 3: Calculate position size based on ATR value
+        qty = round(dollar_risk / atr_value, 3)
         
-        # Check volatility regime and adjust risk if necessary
-        regime = self.get_volatility_regime(symbol)
-        regime_factor = self._get_regime_factor(regime)
+        # Step 4: Adjust position size based on market regime
+        qty = self.adjust_size_for_regime(qty, symbol)
         
-        # Adjust risk based on volatility regime
-        adjusted_dollar_risk = dollar_risk * regime_factor
+        # Step 5: Apply maximum position size constraint
+        max_qty = self.account_equity * self.max_pos_pct / current_price
+        qty = min(qty, max_qty)
         
-        # Calculate position size (dividing by ATR for volatility targeting)
-        position_size = adjusted_dollar_risk / atr_value
+        # Log the details
+        regime = self.current_regime(symbol)
+        logger.info(f"Position sizing: {symbol} ({regime} regime) - ${dollar_risk:.2f} risk, {risk_pct:.2%} of equity")
+        logger.info(f"Final position: {qty:.6f} units ({qty * current_price:.2f} USD)")
         
-        # Calculate notional value
-        notional_value = position_size * current_price
-        
-        # Check if position would exceed maximum size
-        max_notional = self.account_equity * self.max_position_pct
-        if notional_value > max_notional:
-            logger.warning(f"Position size for {symbol} capped at {self.max_position_pct*100:.1f}% of equity "
-                          f"(${max_notional:.2f})")
-            position_size = max_notional / current_price
-            notional_value = max_notional
-        
-        # Check if opening this position would exceed portfolio risk limit
-        new_risk = atr_value * position_size  # Risk in dollar terms (ATR × quantity)
-        can_open = self.can_open_position(symbol, new_risk)
-        
-        # Round position size to appropriate precision
-        # For most crypto, 3 decimal places is good
-        position_size = round(position_size, 3)
-        
-        # Log position sizing details
-        logger.info(f"Position size for {symbol} ({side}): {position_size} coins, "
-                   f"${notional_value:.2f} notional, ${new_risk:.2f} risk, "
-                   f"vol regime: {regime}, risk%: {risk_pct*100:.2f}, can open: {can_open}")
-        
-        return position_size, notional_value, can_open
+        return qty
     
-    def get_volatility_regime(self, symbol):
+    def register_position(self, symbol, position_size, current_price, risk_amount):
         """
-        Get the current volatility regime for a symbol.
+        Register a new position in the portfolio.
         
         Args:
             symbol: Trading pair symbol
-            
-        Returns:
-            str: Volatility regime ('low', 'normal', or 'high')
+            position_size: Position size in base currency
+            current_price: Current market price
+            risk_amount: Dollar risk amount
         """
-        # If we have a cached regime less than 4 hours old, use it
-        if symbol in self.volatility_regimes:
-            regime_data = self.volatility_regimes[symbol]
-            last_update = regime_data.get('updated_at')
-            
-            if last_update:
-                last_update_dt = datetime.fromisoformat(last_update)
-                if datetime.now() - last_update_dt < timedelta(hours=4):
-                    return regime_data.get('regime', 'normal')
+        if symbol in self.active_positions:
+            logger.warning(f"Position already exists for {symbol}, updating")
         
-        # Otherwise, calculate a new regime
-        try:
-            # This would typically use historical price data
-            # For now, default to 'normal' and update this in a real implementation
-            regime = 'normal'
-            
-            # Store the regime
-            self.volatility_regimes[symbol] = {
-                'regime': regime,
-                'updated_at': datetime.now().isoformat()
-            }
-            
-            return regime
-            
-        except Exception as e:
-            logger.error(f"Error calculating volatility regime for {symbol}: {str(e)}")
-            return 'normal'  # Default to normal regime
-    
-    def calculate_volatility_regime(self, symbol, price_data):
-        """
-        Calculate the volatility regime based on historical data.
-        
-        Args:
-            symbol: Trading pair symbol
-            price_data: DataFrame with price data
-            
-        Returns:
-            str: Volatility regime ('low', 'normal', or 'high')
-        """
-        try:
-            # Calculate 30-day realized volatility
-            if len(price_data) < 30:
-                return 'normal'  # Not enough data
-                
-            # Calculate daily returns
-            returns = price_data['close'].pct_change().dropna()
-            
-            # Calculate annualized volatility
-            vol = returns.std() * np.sqrt(365)  # Annualized
-            
-            # Determine regime based on volatility thresholds
-            if vol < 0.03:  # Less than 3% daily vol
-                regime = 'low'
-            elif vol > 0.06:  # More than 6% daily vol
-                regime = 'high'
-            else:
-                regime = 'normal'
-                
-            # Store the regime
-            self.volatility_regimes[symbol] = {
-                'regime': regime,
-                'volatility': vol,
-                'updated_at': datetime.now().isoformat()
-            }
-            
-            logger.info(f"Volatility regime for {symbol}: {regime} (vol: {vol*100:.2f}%)")
-            
-            return regime
-            
-        except Exception as e:
-            logger.error(f"Error calculating volatility regime: {str(e)}")
-            return 'normal'  # Default to normal regime
-    
-    def _get_regime_factor(self, regime):
-        """
-        Get the risk adjustment factor based on volatility regime.
-        
-        Args:
-            regime: Volatility regime ('low', 'normal', or 'high')
-            
-        Returns:
-            float: Risk adjustment factor
-        """
-        if regime == 'low':
-            return 0.5  # Reduce risk in low volatility (ranging) markets
-        elif regime == 'high':
-            return 1.0  # Normal risk in high volatility (trending) markets
-        else:
-            return 0.75  # Slightly reduced risk in normal markets
-    
-    def register_position(self, symbol, side, quantity, entry_price, atr_value, stop_loss=None):
-        """
-        Register a new position with the risk manager.
-        
-        Args:
-            symbol: Trading pair symbol
-            side: Trade direction ('long' or 'short')
-            quantity: Position size in coins
-            entry_price: Entry price
-            atr_value: ATR value at entry
-            stop_loss: Stop loss price (optional)
-            
-        Returns:
-            bool: True if registration successful
-        """
-        # Calculate risk in dollar terms
-        if stop_loss:
-            # Risk based on stop loss
-            risk_per_coin = abs(entry_price - stop_loss)
-            risk = risk_per_coin * quantity
-        else:
-            # Risk based on ATR
-            risk = atr_value * quantity
-        
-        # Calculate notional value
-        notional = entry_price * quantity
-        
-        # Store position data
         self.active_positions[symbol] = {
-            'symbol': symbol,
-            'side': side,
-            'quantity': quantity,
-            'entry_price': entry_price,
-            'notional': notional,
-            'risk': risk,
-            'atr': atr_value,
-            'stop_loss': stop_loss,
-            'entry_time': datetime.now().isoformat()
+            'size': position_size,
+            'entry_price': current_price,
+            'notional_value': position_size * current_price,
+            'risk_allocation': risk_amount / self.account_equity
         }
+    
+    def close_position(self, symbol):
+        """
+        Remove a position from the portfolio.
         
-        # Log position registration
-        logger.info(f"Registered {side} position for {symbol}: {quantity} coins, "
-                   f"${notional:.2f} notional, ${risk:.2f} risk")
+        Args:
+            symbol: Trading pair symbol
+        """
+        if symbol in self.active_positions:
+            del self.active_positions[symbol]
+            logger.info(f"Closed position for {symbol}")
+    
+    def update_account_equity(self, new_equity):
+        """
+        Update the account equity value.
         
-        return True
+        Args:
+            new_equity: New account equity value
+        """
+        self.account_equity = new_equity
+        logger.info(f"Updated account equity to ${new_equity:.2f}")
+    
+    def get_position(self, symbol):
+        """
+        Get position details for a symbol.
+        
+        Args:
+            symbol: Trading pair symbol
+            
+        Returns:
+            dict: Position details or None if position doesn't exist
+        """
+        return self.active_positions.get(symbol, None)
+    
+    def get_total_exposure(self):
+        """
+        Calculate total portfolio exposure.
+        
+        Returns:
+            float: Total notional exposure as percentage of equity
+        """
+        total_notional = sum(pos['notional_value'] for pos in self.active_positions.values())
+        return total_notional / self.account_equity
+    
+    def get_total_risk(self):
+        """
+        Calculate total portfolio risk.
+        
+        Returns:
+            float: Total risk allocation as percentage of equity
+        """
+        return sum(pos['risk_allocation'] for pos in self.active_positions.values())
     
     def update_position(self, symbol, current_price, stop_loss=None, quantity=None):
         """
@@ -315,95 +361,28 @@ class PortfolioRiskManager:
         
         # Update quantity if provided
         if quantity is not None:
-            position['quantity'] = quantity
+            position['size'] = quantity
         
         # Update stop loss if provided
         if stop_loss is not None:
             position['stop_loss'] = stop_loss
         
         # Recalculate notional value
-        position['notional'] = current_price * position['quantity']
+        position['notional_value'] = current_price * position['size']
         
         # Recalculate risk
         if stop_loss:
             # Risk based on stop loss
             risk_per_coin = abs(current_price - stop_loss)
-            position['risk'] = risk_per_coin * position['quantity']
+            position['risk_allocation'] = risk_per_coin * position['size'] / self.account_equity
         else:
             # Risk based on ATR
-            position['risk'] = position['atr'] * position['quantity']
+            position['risk_allocation'] = position['risk_allocation']
         
         # Update timestamp
         position['updated_at'] = datetime.now().isoformat()
         
         return True
-    
-    def close_position(self, symbol):
-        """
-        Remove a position from the active positions registry.
-        
-        Args:
-            symbol: Trading pair symbol
-            
-        Returns:
-            bool: True if successful
-        """
-        if symbol in self.active_positions:
-            del self.active_positions[symbol]
-            logger.info(f"Closed position for {symbol} in risk manager")
-            return True
-        
-        logger.warning(f"Cannot close position for {symbol}: Position not found")
-        return False
-    
-    def can_open_position(self, symbol, new_position_risk):
-        """
-        Check if a new position can be opened without exceeding risk limits.
-        
-        Args:
-            symbol: Trading pair symbol for the new position
-            new_position_risk: Risk of the new position in dollar terms
-            
-        Returns:
-            bool: True if position can be opened
-        """
-        # Calculate current total portfolio risk
-        current_risk = self.get_total_portfolio_risk()
-        
-        # Calculate risk if we add the new position
-        total_risk = current_risk + new_position_risk
-        
-        # Check if opening this position would exceed maximum portfolio risk
-        max_risk = self.account_equity * self.max_portfolio_risk
-        can_open = total_risk <= max_risk
-        
-        if not can_open:
-            logger.warning(f"Cannot open position for {symbol}: "
-                          f"Would exceed portfolio risk limit of {self.max_portfolio_risk*100:.2f}%. "
-                          f"Current risk: ${current_risk:.2f}, New position risk: ${new_position_risk:.2f}, "
-                          f"Total would be: ${total_risk:.2f} > ${max_risk:.2f} max")
-            logger.info("Queued signal – risk cap hit")
-        
-        return can_open
-    
-    def get_total_portfolio_risk(self):
-        """
-        Calculate the total risk across all active positions.
-        
-        Returns:
-            float: Total portfolio risk in dollar terms
-        """
-        return sum(pos['risk'] for pos in self.active_positions.values())
-    
-    def get_portfolio_exposure(self):
-        """
-        Calculate the total portfolio exposure.
-        
-        Returns:
-            float: Total portfolio exposure as percentage of equity
-        """
-        total_notional = sum(pos['notional'] for pos in self.active_positions.values())
-        return total_notional / self.account_equity if self.account_equity > 0 else 0
     
     def position_sizing_for_pyramiding(self, symbol, current_price, atr_value, pyramid_level=0, max_levels=2):
         """
@@ -451,19 +430,32 @@ class PortfolioRiskManager:
         
         return pyramid_size, notional_value, can_add
     
-    def should_enable_pyramiding(self, symbol):
+    def can_open_position(self, symbol, new_position_risk):
         """
-        Determine if pyramiding should be enabled based on market regime.
+        Check if a new position can be opened without exceeding risk limits.
         
         Args:
-            symbol: Trading pair symbol
+            symbol: Trading pair symbol for the new position
+            new_position_risk: Risk of the new position in dollar terms
             
         Returns:
-            bool: True if pyramiding should be enabled
+            bool: True if position can be opened
         """
-        # Check the volatility regime
-        regime = self.get_volatility_regime(symbol)
+        # Calculate current total portfolio risk
+        current_risk = self.get_total_risk()
         
-        # In low volatility regimes, disable pyramiding
-        # In normal or high volatility regimes, enable pyramiding
-        return regime != 'low' 
+        # Calculate risk if we add the new position
+        total_risk = current_risk + new_position_risk
+        
+        # Check if opening this position would exceed maximum portfolio risk
+        max_risk = self.account_equity * self.max_portfolio_risk
+        can_open = total_risk <= max_risk
+        
+        if not can_open:
+            logger.warning(f"Cannot open position for {symbol}: "
+                          f"Would exceed portfolio risk limit of {self.max_portfolio_risk*100:.2f}%. "
+                          f"Current risk: ${current_risk:.2f}, New position risk: ${new_position_risk:.2f}, "
+                          f"Total would be: ${total_risk:.2f} > ${max_risk:.2f} max")
+            logger.info("Queued signal – risk cap hit")
+        
+        return can_open 
