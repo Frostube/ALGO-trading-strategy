@@ -19,12 +19,12 @@ from src.utils.logger import logger
 from src.utils.metrics import profit_factor  # Import the stabilized profit_factor
 
 # Set up logging for detailed output
-logging.basicConfig(level=logging.DEBUG,
+logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger.setLevel(logging.DEBUG)
+logger.setLevel(logging.INFO)
 
 # Minimum number of trades required for reliable statistics
-MIN_TRADES = 3  # Reduced from 5 to 3 to get more parameter sets to explore
+MIN_TRADES = 0  # Set to 0 to accept any number of trades for debugging
 
 # Global variables to be shared with the worker processes
 _data_by_symbol = {}
@@ -65,7 +65,7 @@ def process_param_set(param_set):
 
 def focused_grid_search():
     """Run a focused grid search over a smaller set of parameter combinations"""
-    global _data_by_symbol, _daily_data_by_symbol, _symbols, _timeframe, _days, _initial_balance
+    global _data_by_symbol, _daily_data_by_symbol, _symbols, _timeframe, _days, _initial_balance, MIN_TRADES
     
     parser = argparse.ArgumentParser(description='Run a focused grid search for optimal strategy parameters')
     parser.add_argument('--symbols', type=str, default='BTC/USDT', help='Comma-separated list of symbols')
@@ -73,6 +73,8 @@ def focused_grid_search():
     parser.add_argument('--days', type=int, default=90, help='Number of days to backtest')
     parser.add_argument('--initial-balance', type=float, default=10000, help='Initial account balance')
     parser.add_argument('--workers', type=int, default=1, help='Number of worker processes for parallel execution')
+    parser.add_argument('--debug_mode', action='store_true', help='Run with a single permissive test case to check for any trades')
+    parser.add_argument('--min_trades', type=int, default=MIN_TRADES, help='Minimum number of trades required for valid results')
     args = parser.parse_args()
     
     _symbols = args.symbols.split(',')
@@ -81,13 +83,20 @@ def focused_grid_search():
     _initial_balance = args.initial_balance
     num_workers = max(1, min(args.workers, multiprocessing.cpu_count()))
     
+    # Update MIN_TRADES if specified by command line
+    MIN_TRADES = args.min_trades
+    
     # Define parameter ranges (more focused based on preliminary results)
     ema_fast_range = [3, 5, 8]
     ema_slow_range = [15, 20, 25, 30]
     rsi_period_range = [14]
     rsi_oversold_range = [35, 40]
     rsi_overbought_range = [60, 65]
-    volume_threshold_range = [1.2]
+    volume_threshold_range = [0, 0.8, 1.0, 1.2]  # Include 0 to disable volume filter
+    
+    # Filtering options
+    use_rsi_filter_range = [True, False]  # Option to disable RSI filtering
+    use_volume_filter_range = [True, False]  # Option to disable volume filtering
     
     # Pyramiding parameters
     enable_pyramiding_range = [True]
@@ -97,10 +106,10 @@ def focused_grid_search():
 
     # Risk management parameters
     risk_per_trade_range = [0.0075]  # 0.75% risk per trade
-    use_trend_filter_range = [True]
+    use_trend_filter_range = [True, False]  # Option to disable trend filter
     use_volatility_sizing_range = [True]
     vol_target_pct_range = [0.0075]  # 0.75% volatility target
-    min_bars_between_trades_range = [1]
+    min_bars_between_trades_range = [0, 1]  # Include 0 to allow consecutive trades
     atr_sl_multiplier_range = [1.0, 1.2, 1.4]
     
     # Additional optimization parameters
@@ -109,47 +118,79 @@ def focused_grid_search():
     tp_multiplier_range = [None, 3, 4, 6]  # Take profit multiplier (None for trail only)
     min_hold_bars_range = [0, 3]  # Minimum bars to hold a position
     
-    # Generate all parameter combinations
-    param_combinations = []
-    for params in itertools.product(
-        ema_fast_range, ema_slow_range, rsi_period_range, rsi_oversold_range, 
-        rsi_overbought_range, volume_threshold_range, enable_pyramiding_range,
-        max_pyramid_entries_range, pyramid_threshold_range, pyramid_position_scale_range,
-        risk_per_trade_range, use_trend_filter_range, use_volatility_sizing_range,
-        vol_target_pct_range, min_bars_between_trades_range, atr_sl_multiplier_range,
-        breakeven_trigger_r_range, initial_trail_mult_range, tp_multiplier_range,
-        min_hold_bars_range
-    ):
-        # Skip parameter sets where fast EMA >= slow EMA
-        if params[0] >= params[1]:
-            continue
+    # Debug mode with highly permissive parameters to check if any trades are generated
+    if args.debug_mode:
+        logger.info("Running in debug mode with permissive parameters")
+        # Use a single parameter set with wide filters that should generate trades
+        param_combinations = [{
+            'ema_fast': 3,
+            'ema_slow': 15,
+            'rsi_period': 14,
+            'rsi_oversold': 30,  # Extremely permissive RSI thresholds
+            'rsi_overbought': 70,
+            'volume_threshold': 0.0,  # No volume filter
+            'enable_pyramiding': False,  # Disable pyramiding
+            'max_pyramid_entries': 1,
+            'pyramid_threshold': 0.5,
+            'pyramid_position_scale': 0.5,
+            'risk_per_trade': 0.01,  # Higher risk
+            'use_trend_filter': False,  # No trend filter
+            'use_volatility_sizing': False,  # Fixed position sizing
+            'vol_target_pct': 0.01,
+            'min_bars_between_trades': 0,  # No bar restrictions
+            'atr_sl_multiplier': 2.0,  # Wide stop loss
+            'breakeven_trigger_r': 0.1,  # Quick breakeven
+            'atr_trail_multiplier': 3.0,  # Wide trailing stop
+            'atr_tp_multiplier': None,  # No take profit
+            'min_hold_bars': 0,  # No minimum hold time
+            'use_rsi_filter': False,  # Disable RSI filtering entirely
+            'use_volume_filter': False  # Disable volume filtering entirely
+        }]
+        logger.info(f"Debug mode - using single parameter set: {param_combinations[0]}")
+    else:
+        # Generate all parameter combinations
+        param_combinations = []
+        for params in itertools.product(
+            ema_fast_range, ema_slow_range, rsi_period_range, rsi_oversold_range, 
+            rsi_overbought_range, volume_threshold_range, enable_pyramiding_range,
+            max_pyramid_entries_range, pyramid_threshold_range, pyramid_position_scale_range,
+            risk_per_trade_range, use_trend_filter_range, use_volatility_sizing_range,
+            vol_target_pct_range, min_bars_between_trades_range, atr_sl_multiplier_range,
+            breakeven_trigger_r_range, initial_trail_mult_range, tp_multiplier_range,
+            min_hold_bars_range, use_rsi_filter_range, use_volume_filter_range
+        ):
+            # Skip parameter sets where fast EMA >= slow EMA
+            if params[0] >= params[1]:
+                continue
+            
+            # Create parameter dictionary for this combination
+            param_dict = {
+                'ema_fast': params[0],
+                'ema_slow': params[1],
+                'rsi_period': params[2],
+                'rsi_oversold': params[3],
+                'rsi_overbought': params[4],
+                'volume_threshold': params[5],
+                'enable_pyramiding': params[6],
+                'max_pyramid_entries': params[7],
+                'pyramid_threshold': params[8],
+                'pyramid_position_scale': params[9],
+                'risk_per_trade': params[10],
+                'use_trend_filter': params[11],
+                'use_volatility_sizing': params[12],
+                'vol_target_pct': params[13],
+                'min_bars_between_trades': params[14],
+                'atr_sl_multiplier': params[15],
+                'breakeven_trigger_r': params[16],
+                'atr_trail_multiplier': params[17],
+                'atr_tp_multiplier': params[18],
+                'min_hold_bars': params[19],
+                'use_rsi_filter': params[20],
+                'use_volume_filter': params[21],
+            }
+            param_combinations.append(param_dict)
         
-        # Create parameter dictionary for this combination
-        param_dict = {
-            'ema_fast': params[0],
-            'ema_slow': params[1],
-            'rsi_period': params[2],
-            'rsi_oversold': params[3],
-            'rsi_overbought': params[4],
-            'volume_threshold': params[5],
-            'enable_pyramiding': params[6],
-            'max_pyramid_entries': params[7],
-            'pyramid_threshold': params[8],
-            'pyramid_position_scale': params[9],
-            'risk_per_trade': params[10],
-            'use_trend_filter': params[11],
-            'use_volatility_sizing': params[12],
-            'vol_target_pct': params[13],
-            'min_bars_between_trades': params[14],
-            'atr_sl_multiplier': params[15],
-            'breakeven_trigger_r': params[16],
-            'atr_trail_multiplier': params[17],
-            'atr_tp_multiplier': params[18],
-            'min_hold_bars': params[19],
-        }
-        param_combinations.append(param_dict)
-    
-    logger.info(f"Generated {len(param_combinations)} parameter sets to evaluate")
+        logger.info(f"Generated {len(param_combinations)} parameter sets to evaluate")
     
     # Fetch data once for all parameter combinations
     _data_by_symbol = {}
@@ -302,6 +343,15 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
     Returns:
         dict: Results dictionary or None if criteria not met
     """
+    # Print key parameter settings to help debug
+    print(f"\n\nTESTING PARAMETERS:")
+    print(f"EMA Fast/Slow: {param_set['ema_fast']}/{param_set['ema_slow']}")
+    print(f"RSI Thresholds: {param_set['rsi_oversold']}/{param_set['rsi_overbought']}")
+    print(f"Volume Threshold: {param_set['volume_threshold']}")
+    print(f"Use Trend Filter: {param_set['use_trend_filter']}")
+    print(f"Min Bars Between Trades: {param_set['min_bars_between_trades']}")
+    print(f"ATR SL Multiplier: {param_set['atr_sl_multiplier']}")
+    
     # Split data for walk-forward validation - 80% training, 20% testing
     train_test_splits = {}
     for symbol in symbols:
@@ -351,24 +401,34 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
         train_start, train_end, test_start, test_end = train_test_splits[symbol]
         
         # Create strategy with parameters for training period
+        config_dict = {
+            'ema_fast': param_set['ema_fast'],
+            'ema_slow': param_set['ema_slow'],
+            'ema_trend': 200,  # Fixed trend EMA
+            'enable_pyramiding': param_set['enable_pyramiding'],
+            'max_pyramid_entries': param_set['max_pyramid_entries'],
+            'risk_per_trade': param_set['risk_per_trade'],
+            'use_volatility_sizing': param_set['use_volatility_sizing'],
+            'vol_target_pct': param_set['vol_target_pct'],
+            'atr_sl_multiplier': param_set['atr_sl_multiplier'],
+            'rsi_period': param_set['rsi_period'],
+            'rsi_overbought': param_set['rsi_overbought'],
+            'rsi_oversold': param_set['rsi_oversold'],
+            'volume_threshold': param_set['volume_threshold'],
+            'use_trend_filter': param_set['use_trend_filter'],
+            'min_bars_between_trades': param_set['min_bars_between_trades'],
+            'atr_trail_multiplier': param_set.get('atr_trail_multiplier', 1.25),
+            'atr_tp_multiplier': param_set.get('atr_tp_multiplier', None),
+            'breakeven_trigger_r': param_set.get('breakeven_trigger_r', 0.5),
+            'min_hold_bars': param_set.get('min_hold_bars', 0),
+            'use_rsi_filter': param_set.get('use_rsi_filter', False),
+            'use_volume_filter': param_set.get('use_volume_filter', False)
+        }
+        
         train_strategy = EMACrossoverStrategy(
             symbol=symbol,
             timeframe=timeframe,
-            fast_ema=param_set['ema_fast'],
-            slow_ema=param_set['ema_slow'],
-            enable_pyramiding=param_set['enable_pyramiding'],
-            max_pyramid_entries=param_set['max_pyramid_entries'],
-            risk_per_trade=param_set['risk_per_trade'],
-            use_volatility_sizing=param_set['use_volatility_sizing'],
-            vol_target_pct=param_set['vol_target_pct'],
-            atr_sl_multiplier=param_set['atr_sl_multiplier'],
-            rsi_period=param_set['rsi_period'],
-            rsi_overbought=param_set['rsi_overbought'],
-            rsi_oversold=param_set['rsi_oversold'],
-            volume_threshold=param_set['volume_threshold'],
-            use_trend_filter=param_set['use_trend_filter'],
-            min_bars_between_trades=param_set['min_bars_between_trades'],
-            trend_ema=200  # Fixed trend EMA
+            config=config_dict
         )
         
         # Create backtester for training period
@@ -398,6 +458,7 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
             continue
             
         train_trades_count = len(train_result['trades'])
+        print(f"Training trades for {symbol}: {train_trades_count}")
         if train_trades_count < MIN_TRADES:
             logger.debug(f"Skipping {symbol} - insufficient trades in training period: {train_trades_count} < {MIN_TRADES}")
             continue
@@ -408,21 +469,7 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
         test_strategy = EMACrossoverStrategy(
             symbol=symbol,
             timeframe=timeframe,
-            fast_ema=param_set['ema_fast'],
-            slow_ema=param_set['ema_slow'],
-            enable_pyramiding=param_set['enable_pyramiding'],
-            max_pyramid_entries=param_set['max_pyramid_entries'],
-            risk_per_trade=param_set['risk_per_trade'],
-            use_volatility_sizing=param_set['use_volatility_sizing'],
-            vol_target_pct=param_set['vol_target_pct'],
-            atr_sl_multiplier=param_set['atr_sl_multiplier'],
-            rsi_period=param_set['rsi_period'],
-            rsi_overbought=param_set['rsi_overbought'],
-            rsi_oversold=param_set['rsi_oversold'],
-            volume_threshold=param_set['volume_threshold'],
-            use_trend_filter=param_set['use_trend_filter'],
-            min_bars_between_trades=param_set['min_bars_between_trades'],
-            trend_ema=200  # Fixed trend EMA
+            config=config_dict
         )
         
         # Create backtester for testing period
@@ -454,6 +501,8 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
         test_trades_count = len(test_result['trades'])
         if test_trades_count < MIN_TRADES:
             logger.debug(f"Skipping {symbol} - insufficient trades in testing period: {test_trades_count} < {MIN_TRADES}")
+            # Additional debug print to see if any trades at all are generated
+            print(f"DEBUG: Found {test_trades_count} trades for {symbol} with params: {param_set['ema_fast']}/{param_set['ema_slow']}, RSI: {param_set['rsi_oversold']}/{param_set['rsi_overbought']}, ATR SL: {param_set['atr_sl_multiplier']}")
             continue
             
         logger.debug(f"Testing period for {symbol}: {test_trades_count} trades, PnL: ${test_result.get('pnl', 0):.2f}")
@@ -549,6 +598,17 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
     avg_test_max_dd = total_test_max_dd / valid_symbols
     avg_test_days = total_test_days / valid_symbols
     avg_test_cagr = total_test_cagr / valid_symbols
+    
+    # Direct debug print to show if we found any trades
+    print(f"\nRESULTS SUMMARY:")
+    print(f"Valid symbols: {valid_symbols}")
+    print(f"Total training trades: {total_train_trades}")
+    print(f"Total testing trades: {total_test_trades}")
+    print(f"Avg trades per symbol (train): {avg_train_trades:.1f}")
+    print(f"Avg trades per symbol (test): {avg_test_trades:.1f}")
+    print(f"Avg return: {avg_test_return:.2f}%")
+    print(f"Avg profit factor: {avg_test_pf:.2f}")
+    print(f"------------------------------------")
     
     logger.debug(f"Found valid parameter set with {valid_symbols} symbols, avg test trades: {avg_test_trades:.1f}, avg profit: {avg_test_return:.2f}%")
     

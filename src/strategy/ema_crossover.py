@@ -713,7 +713,7 @@ class EMACrossoverStrategy(BaseStrategy):
                     trade['stop_loss'] = new_stop
                     trade['trailing_stop'] = new_stop
                     if abs(new_stop - old_stop) > (0.1 * last_atr):  # Log only significant changes
-                        logger.info(f"Trail up: {old_stop:.2f} → {new_stop:.2f} ({(new_stop-old_stop):.2f})")
+                        logger.info(f"Trail up: {old_stop:.2f} -> {new_stop:.2f} ({(new_stop-old_stop):.2f})")
             
             # For short orders, trail above price
             else:
@@ -725,7 +725,7 @@ class EMACrossoverStrategy(BaseStrategy):
                     trade['stop_loss'] = new_stop
                     trade['trailing_stop'] = new_stop
                     if abs(new_stop - old_stop) > (0.1 * last_atr):  # Log only significant changes
-                        logger.info(f"Trail down: {old_stop:.2f} → {new_stop:.2f} ({(old_stop-new_stop):.2f})")
+                        logger.info(f"Trail down: {old_stop:.2f} -> {new_stop:.2f} ({(old_stop-new_stop):.2f})")
         
         # Update last price
         trade['last_price'] = current_price
