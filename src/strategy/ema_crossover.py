@@ -42,9 +42,23 @@ class EMACrossoverStrategy(BaseStrategy):
                 risk_per_trade=0.0075, use_volatility_sizing=True, vol_target_pct=0.0075,
                 enable_pyramiding=False, max_pyramid_entries=2, health_monitor=None,
                 atr_trail_multiplier=1.25, atr_tp_multiplier=None, breakeven_trigger_r=0.5,
-                pyramid_threshold=0.5, pyramid_position_scale=0.5, min_hold_bars=0):
+                pyramid_threshold=0.5, pyramid_position_scale=0.5, min_hold_bars=0,
+                **kwargs):  # Add **kwargs to accept any additional parameters
         # Initialize the base class first
         super().__init__(config)
+        
+        # Handle parameter aliases from grid search
+        # If rsi_period is in kwargs but not explicitly provided, use it
+        if 'rsi_period' in kwargs and 'rsi_length' not in kwargs:
+            kwargs['rsi_length'] = kwargs.pop('rsi_period')
+        if 'rsi_oversold' in kwargs and 'rsi_lower' not in kwargs:
+            kwargs['rsi_lower'] = kwargs.pop('rsi_oversold')
+        if 'rsi_overbought' in kwargs and 'rsi_upper' not in kwargs:
+            kwargs['rsi_upper'] = kwargs.pop('rsi_overbought')
+            
+        # Log any unexpected kwargs for debugging
+        if kwargs:
+            logger.debug(f"Additional parameters received: {kwargs}")
         
         # Set strategy-specific attributes
         self.symbol = symbol
@@ -893,6 +907,16 @@ class EMACrossoverStrategy(BaseStrategy):
             'pnl_percent': pnl_percent
         }
         
+        # Calculate R-multiple (risk unit)
+        if 'stop_loss' in self.active_trade and self.active_trade['stop_loss'] is not None:
+            risk = abs(self.active_trade['entry_price'] - self.active_trade['stop_loss']) * self.active_trade['amount']
+            if risk > 0:
+                closed_trade['r_multiple'] = pnl / risk
+            else:
+                closed_trade['r_multiple'] = 0
+        else:
+            closed_trade['r_multiple'] = 0
+            
         # Calculate trade duration
         trade_duration = (closed_trade['exit_time'] - closed_trade['entry_time']).total_seconds() / 60  # minutes
         

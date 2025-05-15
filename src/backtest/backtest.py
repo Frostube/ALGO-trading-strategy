@@ -601,6 +601,60 @@ class Backtester:
             # Update account equity for proper tracking
             account.equity = current_equity
         
+        # Force-close any open position at the end of the backtest
+        if position_qty != 0:
+            # Get the final bar data
+            final_bar = data_with_indicators.iloc[-1]
+            final_price = final_bar['close']
+            final_timestamp = data_with_indicators.index[-1]
+            
+            logger.info(f"Force-closing position at end of backtest: Price ${final_price:.2f}, Qty {position_qty:.6f}")
+            
+            # Apply slippage (worse price on exit)
+            exit_price = self._apply_slippage(final_price, 
+                                           "sell" if position_qty > 0 else "buy")
+            
+            # Calculate P&L
+            trade_pnl = position_qty * (exit_price - entry_price)
+            
+            # Apply commission
+            commission = abs(position_qty * exit_price) * self.COMMISSION
+            trade_pnl -= commission
+            
+            # Update cash and position
+            cash += position_qty * exit_price - commission
+            
+            # Record trade
+            trade = {
+                'entry_time': entry_time,
+                'exit_time': final_timestamp,
+                'type': 'long' if position_qty > 0 else 'short',
+                'entry_price': entry_price,
+                'exit_price': exit_price,
+                'size': abs(position_qty),
+                'pnl': trade_pnl,
+                'return': trade_pnl / (entry_price * abs(position_qty)),
+                'equity_before': equity_curve[-1],
+                'equity_after': cash,
+                'pct_return': trade_pnl / equity_curve[-1],  # Return on account equity
+                'commission': commission,
+                'exit_reason': 'session_end'
+            }
+            trades.append(trade)
+            logger.info(f"Exited {trade['type']} trade at end of session: Entry ${entry_price:.2f}, Exit ${exit_price:.2f}, PnL ${trade_pnl:.2f} ({trade['pct_return']*100:.2f}%)")
+            
+            # Reset position
+            position_qty = 0
+            entry_price = 0
+            
+            # Update equity curve with final value
+            current_equity = cash
+            equity_curve[-1] = current_equity
+            
+            # Update strategy with the trade if it has the method
+            if hasattr(strategy, 'update_trade_history'):
+                strategy.update_trade_history(trade)
+        
         logger.info(f"Backtest complete. Signal counts - Buy: {signal_count['buy']}, Sell: {signal_count['sell']}, None: {signal_count['']}")
         logger.info(f"Final equity: ${equity_curve[-1]:.2f}, Initial: ${equity_curve[0]:.2f}, Return: {(equity_curve[-1]/equity_curve[0]-1)*100:.2f}%")
         logger.info(f"Trades executed: {len(trades)}")

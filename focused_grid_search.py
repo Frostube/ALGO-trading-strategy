@@ -11,20 +11,27 @@ from tqdm import tqdm
 import multiprocessing
 from functools import partial
 import logging
+import csv
 
 from src.data.fetcher import DataFetcher, fetch_ohlcv
 from src.strategy.ema_crossover import EMACrossoverStrategy
 from src.backtest.backtest import Backtester, MockAccount
 from src.utils.logger import logger
-from src.utils.metrics import profit_factor  # Import the stabilized profit_factor
+from src.utils.metrics import profit_factor, calculate_expectancy, calculate_r_multiples  # Import the new function
 
 # Set up logging for detailed output
 logging.basicConfig(level=logging.INFO,
                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger.setLevel(logging.INFO)
 
-# Minimum number of trades required for reliable statistics
-MIN_TRADES = 0  # Set to 0 to accept any number of trades for debugging
+# Minimum number of trades required for a valid backtest
+MIN_TRADES = 5   # Lower threshold for discovery phase
+# Minimum profit factor required to consider a parameter set
+MIN_PROFIT_FACTOR = 1.0
+
+# Percentage of data to use for training
+# Remaining data used for validation
+TRAIN_PCT = 0.7
 
 # Global variables to be shared with the worker processes
 _data_by_symbol = {}
@@ -75,6 +82,7 @@ def focused_grid_search():
     parser.add_argument('--workers', type=int, default=1, help='Number of worker processes for parallel execution')
     parser.add_argument('--debug_mode', action='store_true', help='Run with a single permissive test case to check for any trades')
     parser.add_argument('--min_trades', type=int, default=MIN_TRADES, help='Minimum number of trades required for valid results')
+    parser.add_argument('--top_n', type=int, default=5, help='Number of top parameter sets to display')
     args = parser.parse_args()
     
     _symbols = args.symbols.split(',')
@@ -86,37 +94,40 @@ def focused_grid_search():
     # Update MIN_TRADES if specified by command line
     MIN_TRADES = args.min_trades
     
-    # Define parameter ranges (more focused based on preliminary results)
-    ema_fast_range = [3, 5, 8]
-    ema_slow_range = [15, 20, 25, 30]
-    rsi_period_range = [14]
-    rsi_oversold_range = [35, 40]
-    rsi_overbought_range = [60, 65]
-    volume_threshold_range = [0, 0.8, 1.0, 1.2]  # Include 0 to disable volume filter
+    # Define parameter ranges for grid search
+    ema_fast_range = [8, 12, 16, 21]
+    ema_slow_range = [21, 30, 50, 89]
+    rsi_period_range = [14]  # Standard
+    rsi_oversold_range = [35, 40, 45]
+    rsi_overbought_range = [55, 60, 65, 70]
+    volume_threshold_range = [1.0, 1.2, 1.5]
+
+    # New pyramiding parameters
+    enable_pyramiding_range = [True, False]
+    max_pyramid_entries_range = [2, 3]
+    pyramid_threshold_range = [0.5, 1.0, 1.5]
+    pyramid_position_scale_range = [0.5]
+
+    # Risk parameters
+    risk_per_trade_range = [0.005, 0.0075, 0.01]
+
+    # Strategy features
+    use_trend_filter_range = [True]
+    use_volatility_sizing_range = [True]
+
+    # Exits
+    atr_sl_multiplier_range = [1.0, 1.2, 1.4, 1.6, 2.0]
+    breakeven_trigger_r_range = [0.5, 1.0, 1.2, 1.5]
+    atr_trail_multiplier_range = [1.5, 2.0, 2.5, 3.0]
+    # A value of None means no take profit
+    atr_tp_multiplier_range = [None, 3, 4, 6]
+
+    # Minimum bars (time) to hold a trade
+    min_hold_bars_range = [0, 3, 5, 8]
     
     # Filtering options
     use_rsi_filter_range = [True, False]  # Option to disable RSI filtering
     use_volume_filter_range = [True, False]  # Option to disable volume filtering
-    
-    # Pyramiding parameters
-    enable_pyramiding_range = [True]
-    max_pyramid_entries_range = [2]
-    pyramid_threshold_range = [0.5]
-    pyramid_position_scale_range = [0.5]
-
-    # Risk management parameters
-    risk_per_trade_range = [0.0075]  # 0.75% risk per trade
-    use_trend_filter_range = [True, False]  # Option to disable trend filter
-    use_volatility_sizing_range = [True]
-    vol_target_pct_range = [0.0075]  # 0.75% volatility target
-    min_bars_between_trades_range = [0, 1]  # Include 0 to allow consecutive trades
-    atr_sl_multiplier_range = [1.0, 1.2, 1.4]
-    
-    # Additional optimization parameters
-    breakeven_trigger_r_range = [0.5, 1.0, 1.2]  # R multiples to trigger breakeven
-    initial_trail_mult_range = [1.25, 1.5, 2.0]  # Initial trail ATR multiplier
-    tp_multiplier_range = [None, 3, 4, 6]  # Take profit multiplier (None for trail only)
-    min_hold_bars_range = [0, 3]  # Minimum bars to hold a position
     
     # Debug mode with highly permissive parameters to check if any trades are generated
     if args.debug_mode:
@@ -155,8 +166,6 @@ def focused_grid_search():
             rsi_overbought_range, volume_threshold_range, enable_pyramiding_range,
             max_pyramid_entries_range, pyramid_threshold_range, pyramid_position_scale_range,
             risk_per_trade_range, use_trend_filter_range, use_volatility_sizing_range,
-            vol_target_pct_range, min_bars_between_trades_range, atr_sl_multiplier_range,
-            breakeven_trigger_r_range, initial_trail_mult_range, tp_multiplier_range,
             min_hold_bars_range, use_rsi_filter_range, use_volume_filter_range
         ):
             # Skip parameter sets where fast EMA >= slow EMA
@@ -178,15 +187,9 @@ def focused_grid_search():
                 'risk_per_trade': params[10],
                 'use_trend_filter': params[11],
                 'use_volatility_sizing': params[12],
-                'vol_target_pct': params[13],
-                'min_bars_between_trades': params[14],
-                'atr_sl_multiplier': params[15],
-                'breakeven_trigger_r': params[16],
-                'atr_trail_multiplier': params[17],
-                'atr_tp_multiplier': params[18],
-                'min_hold_bars': params[19],
-                'use_rsi_filter': params[20],
-                'use_volume_filter': params[21],
+                'min_hold_bars': params[13],
+                'use_rsi_filter': params[14],
+                'use_volume_filter': params[15],
             }
             param_combinations.append(param_dict)
         
@@ -236,92 +239,78 @@ def focused_grid_search():
             # Extract all trades from all symbols
             all_trades = []
             for symbol_result in r['symbol_results'].values():
-                if 'trades' in symbol_result:
-                    all_trades.extend(symbol_result.get('trades', []))
+                if 'trades' in symbol_result.get('train', {}):
+                    trades = symbol_result['train'].get('trades', [])
+                    
+                    # Diagnostic: Check for trades missing pnl
+                    for i, tr in enumerate(trades):
+                        if "pnl" not in tr:
+                            logger.error(f"Trade {i} is missing pnl: {tr}")
+                            
+                    all_trades.extend(trades)
             
-            # Calculate win rate
-            win_rate = r['avg_test_win_rate'] / 100  # Convert from percentage
+            # Calculate R metrics if not already calculated
+            if 'train_r_metrics' not in r:
+                r['train_r_metrics'] = calculate_r_multiples(all_trades)
             
-            # Calculate average win and loss
-            win_pnls = [t['pnl'] for t in all_trades if t['pnl'] > 0]
-            loss_pnls = [abs(t['pnl']) for t in all_trades if t['pnl'] <= 0]  # Store as positive values
-            
-            avg_win = np.mean(win_pnls) if win_pnls else 0.0
-            avg_loss = np.mean(loss_pnls) if loss_pnls else 0.0
-            
-            # Expectancy calculation
-            if avg_loss == 0:
-                expectancy = avg_win * win_rate
-            else:
-                expectancy = (avg_win * win_rate) - (avg_loss * (1 - win_rate))
-            
-            # Calculate trades per month
-            total_days = r['avg_test_days']
-            total_trades = len(all_trades)
-            trades_per_month = (total_trades / total_days) * 30 if total_days > 0 else 0
-            
-            # Expectancy score (expectancy × trades per month)
-            r['expectancy_score'] = expectancy * trades_per_month
-            
-            # Calculate CAGR/DD ratio - return divided by max drawdown
-            max_dd = r['avg_test_max_dd']
-            cagr = r['avg_test_cagr']
-            r['avg_test_cagr_dd'] = cagr / max(0.01, abs(max_dd))  # Avoid division by zero
-            
-            # Consistency score - based on difference between train and test results
-            train_pf = r['avg_train_pf']
-            test_pf = r['avg_test_pf']
-            train_return = r['avg_train_return']
-            test_return = r['avg_test_return']
-            
-            # Penalize large differences between train and test
-            pf_ratio = min(train_pf, test_pf) / max(1.01, max(train_pf, test_pf))
-            return_ratio = min(train_return, test_return) / max(0.01, max(train_return, test_return))
-            
-            # Consistency score: 1 = perfect consistency, 0 = completely inconsistent
-            r['consistency_score'] = (pf_ratio + return_ratio) / 2
-        
-        # Get maximum values for normalization
-        max_expectancy = max(r['expectancy_score'] for r in all_results) or 1e-6
-        max_cagr_dd = max(r['avg_test_cagr_dd'] for r in all_results) or 1e-6
-        
-        # Calculate weighted scores
-        for r in all_results:
-            r['weighted_score'] = (
-                0.6 * r['expectancy_score'] / max_expectancy +
-                0.3 * r['avg_test_cagr_dd'] / max_cagr_dd +
-                0.1 * r['consistency_score']
-            )
-        
-        # Sort by weighted score
-        all_results.sort(key=lambda x: x['weighted_score'], reverse=True)
-        
-        # Print top results
-        logger.info(f"Top 5 parameter sets by weighted score:")
-        for i, result in enumerate(all_results[:5]):
-            logger.info(f"{i+1}. {result['params']} - Score: {result['weighted_score']:.4f}, "
-                       f"Win Rate: {result['avg_test_win_rate']:.2f}%, "
-                       f"PF: {result['avg_test_pf']:.2f}, "
-                       f"Return: {result['avg_test_return']:.2f}%, "
-                       f"Trades: {result['avg_test_trades']:.1f}")
-        
-        # Save best parameters to file
-        if all_results:
-            best_params = all_results[0]['params']
-            with open('optimal_params.txt', 'w') as f:
-                f.write("Optimal parameters found via grid search:\n\n")
-                for k, v in best_params.items():
-                    f.write(f"{k} = {v}\n")
+            # Calculate weighted score if not already done
+            if 'train_score' not in r:
+                # Convert max drawdown to R units
+                max_dd_pct = r.get('max_drawdown_pct', 0)
+                risk_per_trade = r['param_set'].get('risk_per_trade', 0.01)
+                max_dd_r = max_dd_pct / risk_per_trade
                 
-                f.write("\nPerformance metrics:\n")
-                f.write(f"Win Rate: {all_results[0]['avg_test_win_rate']:.2f}%\n")
-                f.write(f"Profit Factor: {all_results[0]['avg_test_pf']:.2f}\n")
-                f.write(f"Return: {all_results[0]['avg_test_return']:.2f}%\n")
-                f.write(f"Max Drawdown: {all_results[0]['avg_test_max_dd']:.2f}%\n")
-                f.write(f"Avg Trades: {all_results[0]['avg_test_trades']:.1f}\n")
-                f.write(f"Expectancy Score: {all_results[0]['expectancy_score']:.4f}\n")
-                f.write(f"CAGR/DD Ratio: {all_results[0]['avg_test_cagr_dd']:.2f}\n")
-                f.write(f"Consistency Score: {all_results[0]['consistency_score']:.2f}\n")
+                # R-based weighted score
+                r['train_score'] = r['train_r_metrics']['expectancy'] - 0.5 * max_dd_r
+        
+        # Save results to CSV
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        csv_file = f"grid_search_results_{timestamp}.csv"
+        
+        try:
+            with open(csv_file, 'w', newline='') as f:
+                fieldnames = ['timestamp', 'symbols', 'timeframe', 'params', 'score', 'expectancy', 
+                             'win_rate', 'avg_r', 'total_trades', 'total_r_risked',
+                             'max_dd_r', 'pct_trades_over_2r', 'pct_trades_over_5r']
+                writer = csv.DictWriter(f, fieldnames=fieldnames)
+                writer.writeheader()
+                
+                for r in sorted(all_results, key=lambda x: x.get('train_score', 0), reverse=True):
+                    writer.writerow({
+                        'timestamp': timestamp,
+                        'symbols': ','.join(r['valid_symbols']),
+                        'timeframe': args.timeframe,
+                        'params': str(r['param_set']),
+                        'score': r.get('train_score', 0),
+                        'expectancy': r['train_r_metrics'].get('expectancy', 0),
+                        'win_rate': r['train_r_metrics'].get('win_rate', 0),
+                        'avg_r': r['train_r_metrics'].get('avg_r', 0),
+                        'total_trades': len(r.get('all_train_trades', [])),
+                        'total_r_risked': r['train_r_metrics'].get('total_r_risked', 0),
+                        'max_dd_r': r.get('train_max_dd_r', 0),
+                        'pct_trades_over_2r': r['train_r_metrics'].get('pct_trades_over_2r', 0),
+                        'pct_trades_over_5r': r['train_r_metrics'].get('pct_trades_over_5r', 0)
+                    })
+                    
+            logger.info(f"Results saved to {csv_file}")
+        except Exception as e:
+            logger.error(f"Error saving results to CSV: {e}")
+            
+        # Sort by expectancy (from R-metrics)
+        all_results.sort(key=lambda x: x.get('train_score', 0), reverse=True)
+        
+        # Display top results
+        logger.info(f"Top {min(args.top_n, len(all_results))} parameter sets by R-weighted score:")
+        for i, r in enumerate(all_results[:args.top_n]):
+            param_summary = {k: r['param_set'][k] for k in ['ema_fast', 'ema_slow', 'rsi_oversold', 'rsi_overbought', 
+                                                           'enable_pyramiding', 'atr_sl_multiplier', 'breakeven_trigger_r',
+                                                           'atr_trail_multiplier', 'atr_tp_multiplier']}
+            logger.info(f"{i+1}. Score: {r.get('train_score', 0):.3f}, "
+                       f"Expectancy: {r['train_r_metrics'].get('expectancy', 0):.3f}, "
+                       f"Win Rate: {r['train_r_metrics'].get('win_rate', 0)*100:.1f}%, "
+                       f"Avg R: {r['train_r_metrics'].get('avg_r', 0):.2f}, "
+                       f"Max DD R: {r.get('train_max_dd_r', 0):.2f}, "
+                       f"Params: {param_summary}")
     else:
         logger.info("No valid parameter sets found that meet the minimum trade criteria.")
     
@@ -344,111 +333,56 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
         dict: Results dictionary or None if criteria not met
     """
     # Print key parameter settings to help debug
-    print(f"\n\nTESTING PARAMETERS:")
-    print(f"EMA Fast/Slow: {param_set['ema_fast']}/{param_set['ema_slow']}")
-    print(f"RSI Thresholds: {param_set['rsi_oversold']}/{param_set['rsi_overbought']}")
-    print(f"Volume Threshold: {param_set['volume_threshold']}")
-    print(f"Use Trend Filter: {param_set['use_trend_filter']}")
-    print(f"Min Bars Between Trades: {param_set['min_bars_between_trades']}")
-    print(f"ATR SL Multiplier: {param_set['atr_sl_multiplier']}")
+    print_params = {k: v for k, v in param_set.items() if k in ['ema_fast', 'ema_slow', 'rsi_oversold', 'rsi_overbought', 
+                                                              'enable_pyramiding', 'atr_sl_multiplier', 'breakeven_trigger_r', 
+                                                              'atr_trail_multiplier', 'atr_tp_multiplier']}
+    logger.debug(f"Testing parameters: {param_set}")
     
-    # Split data for walk-forward validation - 80% training, 20% testing
-    train_test_splits = {}
-    for symbol in symbols:
-        df = data_by_symbol[symbol]
-        split_idx = int(len(df) * 0.8)
-        
-        train_data = df.iloc[:split_idx]
-        test_data = df.iloc[split_idx:]
-        
-        # Get dates for the split points
-        if len(train_data) > 0 and len(test_data) > 0:
-            train_start = train_data.index[0]
-            train_end = train_data.index[-1]
-            test_start = test_data.index[0]
-            test_end = test_data.index[-1]
-            
-            train_test_splits[symbol] = (train_start, train_end, test_start, test_end)
-            logger.debug(f"Split data for {symbol}: Train {train_start} to {train_end}, Test {test_start} to {test_end}")
-    
-    # Results for each symbol
-    symbol_results = {}
-    
-    # Training period metrics
-    total_train_pf = 0
-    total_train_win_rate = 0
-    total_train_return = 0
-    total_train_trades = 0
-    total_train_max_dd = 0
-    
-    # Testing period metrics
-    total_test_pf = 0
-    total_test_win_rate = 0
-    total_test_return = 0
-    total_test_trades = 0
-    total_test_max_dd = 0
-    total_test_days = 0
-    total_test_cagr = 0
-    
-    valid_symbols = 0
+    results = {}
+    valid_symbols = []
     
     for symbol in symbols:
-        # Skip symbols without enough data
-        if symbol not in train_test_splits:
-            logger.debug(f"Skipping {symbol} - insufficient data for split")
+        if symbol not in data_by_symbol or symbol not in daily_data_by_symbol:
+            logger.debug(f"Skipping {symbol} - missing data")
             continue
+            
+        # Get data for this symbol
+        candles = data_by_symbol[symbol]
+        daily_candles = daily_data_by_symbol[symbol]
         
-        train_start, train_end, test_start, test_end = train_test_splits[symbol]
+        # Skip if not enough data
+        if len(candles) < 50:
+            logger.debug(f"Skipping {symbol} - not enough candles")
+            continue
+            
+        # Split into train/test sets
+        split_idx = int(len(candles) * TRAIN_PCT)
         
-        # Create strategy with parameters for training period
-        config_dict = {
-            'ema_fast': param_set['ema_fast'],
-            'ema_slow': param_set['ema_slow'],
-            'ema_trend': 200,  # Fixed trend EMA
-            'enable_pyramiding': param_set['enable_pyramiding'],
-            'max_pyramid_entries': param_set['max_pyramid_entries'],
-            'risk_per_trade': param_set['risk_per_trade'],
-            'use_volatility_sizing': param_set['use_volatility_sizing'],
-            'vol_target_pct': param_set['vol_target_pct'],
-            'atr_sl_multiplier': param_set['atr_sl_multiplier'],
-            'rsi_period': param_set['rsi_period'],
-            'rsi_overbought': param_set['rsi_overbought'],
-            'rsi_oversold': param_set['rsi_oversold'],
-            'volume_threshold': param_set['volume_threshold'],
-            'use_trend_filter': param_set['use_trend_filter'],
-            'min_bars_between_trades': param_set['min_bars_between_trades'],
-            'atr_trail_multiplier': param_set.get('atr_trail_multiplier', 1.25),
-            'atr_tp_multiplier': param_set.get('atr_tp_multiplier', None),
-            'breakeven_trigger_r': param_set.get('breakeven_trigger_r', 0.5),
-            'min_hold_bars': param_set.get('min_hold_bars', 0),
-            'use_rsi_filter': param_set.get('use_rsi_filter', False),
-            'use_volume_filter': param_set.get('use_volume_filter', False)
-        }
+        # Train period
+        train_candles = candles.iloc[:split_idx].copy()
+        train_daily_candles = daily_candles.copy()  # Use all daily candles for confirmation
         
-        train_strategy = EMACrossoverStrategy(
+        # Test period (validation)
+        test_candles = candles.iloc[split_idx:].copy()
+        
+        # Initialize backtester
+        backtester = Backtester(initial_balance=initial_balance)
+        
+        # Create strategy instance with parameters
+        strategy = EMACrossoverStrategy(
             symbol=symbol,
             timeframe=timeframe,
-            config=config_dict
+            config=param_set
         )
         
-        # Create backtester for training period
-        train_backtester = Backtester(
-            initial_balance=initial_balance,
-            params=param_set
+        # Run backtest on training data
+        train_result = backtester.run_single_backtest(
+            strategy=strategy,
+            data=train_candles, 
+            higher_tf_df=train_daily_candles
         )
         
-        # Run backtest on training period
-        train_df = data_by_symbol[symbol][(data_by_symbol[symbol].index >= train_start) & 
-                                         (data_by_symbol[symbol].index <= train_end)]
-        train_htf_df = daily_data_by_symbol[symbol]
-        
-        train_result = None
-        
-        # Only proceed if we have data
-        if len(train_df) > 0:
-            train_result = train_backtester.run_single_backtest(train_strategy, train_df, train_htf_df)
-        
-        # Skip if training period didn't produce valid results
+        # Check if training period didn't produce valid results
         if train_result is None:
             logger.debug(f"Skipping {symbol} - no training results")
             continue
@@ -456,179 +390,171 @@ def run_backtest(symbols, data_by_symbol, daily_data_by_symbol, param_set, timef
         if 'trades' not in train_result:
             logger.debug(f"Skipping {symbol} - no trades found in training period")
             continue
+        
+        # Debug: check the structure of train_result
+        logger.debug(f"Train result keys: {train_result.keys()}")
+        if 'pnl' not in train_result:
+            logger.error(f"Missing 'pnl' in train_result. Available keys: {train_result.keys()}")
+            # Add pnl key based on trade results
+            total_pnl = sum(t.get('pnl', 0) for t in train_result.get('trades', []))
+            train_result['pnl'] = total_pnl
+            logger.info(f"Added missing 'pnl' key to train_result: {total_pnl}")
+        
+        # Ensure each trade has a pnl field and compute r_multiples
+        for i, trade in enumerate(train_result.get('trades', [])):
+            if 'pnl' not in trade:
+                logger.error(f"Trade {i} in training is missing pnl: {trade}")
+                # If pnl is missing, calculate it from entry and exit prices
+                if all(k in trade for k in ['entry_price', 'exit_price', 'size']):
+                    try:
+                        # Determine if long or short
+                        if trade.get('type', '').lower() == 'long' or trade.get('side', '').lower() == 'buy':
+                            trade['pnl'] = (float(trade['exit_price']) - float(trade['entry_price'])) * float(trade['size'])
+                        else:  # short
+                            trade['pnl'] = (float(trade['entry_price']) - float(trade['exit_price'])) * float(trade['size'])
+                        logger.info(f"Added missing 'pnl' to trade {i}: {trade['pnl']}")
+                    except (ValueError, KeyError) as e:
+                        logger.error(f"Error calculating pnl for trade {i}: {e}")
+        
+        # Calculate r-multiples for the training set
+        r_metrics = calculate_r_multiples(train_result.get('trades', []))
+        train_result['r_metrics'] = r_metrics
+        
+        # If we have enough training trades, continue to validation
+        if len(train_result.get('trades', [])) >= MIN_TRADES:
+            # Create a new strategy instance for test data
+            test_strategy = EMACrossoverStrategy(
+                symbol=symbol,
+                timeframe=timeframe,
+                config=param_set
+            )
             
-        train_trades_count = len(train_result['trades'])
-        print(f"Training trades for {symbol}: {train_trades_count}")
-        if train_trades_count < MIN_TRADES:
-            logger.debug(f"Skipping {symbol} - insufficient trades in training period: {train_trades_count} < {MIN_TRADES}")
-            continue
+            # Run validation only if training was successful
+            test_result = backtester.run_single_backtest(
+                strategy=test_strategy,
+                data=test_candles, 
+                higher_tf_df=train_daily_candles  # Same daily data
+            )
             
-        logger.debug(f"Training period for {symbol}: {train_trades_count} trades, PnL: ${train_result.get('pnl', 0):.2f}")
-        
-        # Create strategy with same parameters for testing period
-        test_strategy = EMACrossoverStrategy(
-            symbol=symbol,
-            timeframe=timeframe,
-            config=config_dict
-        )
-        
-        # Create backtester for testing period
-        test_backtester = Backtester(
-            initial_balance=initial_balance,
-            params=param_set
-        )
-        
-        # Run backtest on testing period
-        test_df = data_by_symbol[symbol][(data_by_symbol[symbol].index >= test_start) & 
-                                        (data_by_symbol[symbol].index <= test_end)]
-        test_htf_df = daily_data_by_symbol[symbol]
-        
-        test_result = None
-        
-        # Only proceed if we have data
-        if len(test_df) > 0:
-            test_result = test_backtester.run_single_backtest(test_strategy, test_df, test_htf_df)
-        
-        # Skip if testing period didn't produce valid results
-        if test_result is None:
-            logger.debug(f"Skipping {symbol} - no test results")
-            continue
-            
-        if 'trades' not in test_result:
-            logger.debug(f"Skipping {symbol} - no trades found in testing period")
-            continue
-            
-        test_trades_count = len(test_result['trades'])
-        if test_trades_count < MIN_TRADES:
-            logger.debug(f"Skipping {symbol} - insufficient trades in testing period: {test_trades_count} < {MIN_TRADES}")
-            # Additional debug print to see if any trades at all are generated
-            print(f"DEBUG: Found {test_trades_count} trades for {symbol} with params: {param_set['ema_fast']}/{param_set['ema_slow']}, RSI: {param_set['rsi_oversold']}/{param_set['rsi_overbought']}, ATR SL: {param_set['atr_sl_multiplier']}")
-            continue
-            
-        logger.debug(f"Testing period for {symbol}: {test_trades_count} trades, PnL: ${test_result.get('pnl', 0):.2f}")
-        
-        # Calculate key metrics for this symbol
-        train_trades = len(train_result['trades'])
-        train_wins = sum(1 for t in train_result['trades'] if t['pnl'] > 0)
-        train_losses = sum(1 for t in train_result['trades'] if t['pnl'] <= 0)
-        
-        train_win_rate = (train_wins / train_trades * 100) if train_trades > 0 else 0
-        train_gross_profit = sum(t['pnl'] for t in train_result['trades'] if t['pnl'] > 0)
-        train_gross_loss = sum(t['pnl'] for t in train_result['trades'] if t['pnl'] <= 0)
-        train_profit_factor = profit_factor(
-            [t['pnl'] for t in train_result['trades'] if t['pnl'] > 0],
-            [t['pnl'] for t in train_result['trades'] if t['pnl'] <= 0]
-        )
-        
-        test_trades = len(test_result['trades'])
-        test_wins = sum(1 for t in test_result['trades'] if t['pnl'] > 0)
-        test_losses = sum(1 for t in test_result['trades'] if t['pnl'] <= 0)
-        
-        test_win_rate = (test_wins / test_trades * 100) if test_trades > 0 else 0
-        test_gross_profit = sum(t['pnl'] for t in test_result['trades'] if t['pnl'] > 0)
-        test_gross_loss = sum(t['pnl'] for t in test_result['trades'] if t['pnl'] <= 0)
-        test_profit_factor = profit_factor(
-            [t['pnl'] for t in test_result['trades'] if t['pnl'] > 0],
-            [t['pnl'] for t in test_result['trades'] if t['pnl'] <= 0]
-        )
-        
-        # Calculate test period duration in days
-        test_days = (test_end - test_start).days
-        
-        # Calculate annualized return (CAGR)
-        test_return_pct = test_result['pnl'] / initial_balance * 100
-        annual_multiplier = 365 / max(1, test_days)
-        test_cagr = ((1 + test_return_pct/100) ** annual_multiplier - 1) * 100
-        
-        # Store results for this symbol
-        symbol_results[symbol] = {
-            'train_win_rate': train_win_rate,
-            'train_pnl': train_result['pnl'],
-            'train_return': train_result['pnl'] / initial_balance * 100,
-            'train_pf': train_profit_factor,
-            'train_trades': train_trades,
-            'train_max_dd': train_result.get('max_drawdown', 0),
-            
-            'test_win_rate': test_win_rate,
-            'test_pnl': test_result['pnl'],
-            'test_return': test_return_pct,
-            'test_pf': test_profit_factor,
-            'test_trades': test_trades,
-            'test_max_dd': test_result.get('max_drawdown', 0),
-            'test_days': test_days,
-            'test_cagr': test_cagr,
-            
-            'trades': test_result['trades'],  # Store test trades for further analysis
-        }
-        
-        # Accumulate metrics for averaging
-        total_train_pf += train_profit_factor
-        total_train_win_rate += train_win_rate
-        total_train_return += train_result['pnl'] / initial_balance * 100
-        total_train_trades += train_trades
-        total_train_max_dd += train_result.get('max_drawdown', 0)
-        
-        total_test_pf += test_profit_factor
-        total_test_win_rate += test_win_rate
-        total_test_return += test_return_pct
-        total_test_trades += test_trades
-        total_test_max_dd += test_result.get('max_drawdown', 0)
-        total_test_days += test_days
-        total_test_cagr += test_cagr
-        
-        valid_symbols += 1
-        logger.debug(f"Valid results for {symbol} - added to results")
+            # Validate test results
+            if test_result is not None and 'trades' in test_result:
+                # Check if we're at end of test without a trade closed
+                # Instead of accessing backtester.strategy, check the test_result to see if the last trade is complete
+                # Look for any open trade by checking if the last candle timestamp matches the last trade timestamp
+                last_candle_time = test_candles.index[-1]
+                
+                # Check for any incomplete trades (missing exit_time or exit_price)
+                incomplete_trade = False
+                if 'trades' in test_result and len(test_result['trades']) > 0:
+                    last_trade = test_result['trades'][-1]
+                    if 'exit_time' not in last_trade or 'exit_price' not in last_trade:
+                        incomplete_trade = True
+                
+                if incomplete_trade:
+                    # Force close the trade
+                    final_price = test_candles["close"].iloc[-1]
+                    # Add a new trade with exit info
+                    closed_trade = last_trade.copy()
+                    closed_trade['exit_time'] = last_candle_time
+                    closed_trade['exit_price'] = final_price
+                    closed_trade['exit_reason'] = "session_end"
+                    
+                    # Calculate PnL
+                    if closed_trade['side'] == 'buy':
+                        pnl = (final_price - closed_trade['entry_price']) * closed_trade['amount']
+                    else:  # short
+                        pnl = (closed_trade['entry_price'] - final_price) * closed_trade['amount'] 
+                    
+                    closed_trade['pnl'] = pnl
+                    
+                    # Replace the incomplete trade
+                    test_result['trades'][-1] = closed_trade
+                    logger.info(f"Added force-closed trade with PnL: {pnl}")
+                
+                # Check if test set also meets minimum criteria
+                if len(test_result.get('trades', [])) > 0:
+                    # Add PNL to test results if missing
+                    if 'pnl' not in test_result:
+                        test_result['pnl'] = sum(t.get('pnl', 0) for t in test_result.get('trades', []))
+                    
+                    # Check for missing pnl in test trades
+                    for i, trade in enumerate(test_result.get('trades', [])):
+                        if 'pnl' not in trade:
+                            logger.error(f"Test trade {i} missing pnl: {trade}")
+                            # Add pnl if possible
+                            if all(k in trade for k in ['entry_price', 'exit_price', 'size']):
+                                try:
+                                    is_long = trade.get('type', '').lower() == 'long' or trade.get('side', '').lower() == 'buy'
+                                    if is_long:
+                                        trade['pnl'] = (float(trade['exit_price']) - float(trade['entry_price'])) * float(trade['size'])
+                                    else:  # short
+                                        trade['pnl'] = (float(trade['entry_price']) - float(trade['exit_price'])) * float(trade['size'])
+                                    logger.info(f"Added pnl to test trade {i}: {trade['pnl']}")
+                                except (ValueError, KeyError) as e:
+                                    logger.error(f"Error calculating pnl for test trade {i}: {e}")
+                    
+                    # Calculate R metrics for the test set
+                    test_r_metrics = calculate_r_multiples(test_result.get('trades', []))
+                    test_result['r_metrics'] = test_r_metrics
+                    
+                    valid_symbols.append(symbol)
+                    results[symbol] = {
+                        'train': train_result,
+                        'train_r_metrics': r_metrics,
+                        'test': test_result,
+                        'test_r_metrics': test_r_metrics
+                    }
     
-    # Return None if no valid symbols were found
-    if valid_symbols == 0:
+    if not valid_symbols:
         logger.debug(f"No valid symbols found for parameter set {param_set}")
         return None
     
-    # Calculate averages
-    avg_train_pf = total_train_pf / valid_symbols
-    avg_train_win_rate = total_train_win_rate / valid_symbols
-    avg_train_return = total_train_return / valid_symbols
-    avg_train_trades = total_train_trades / valid_symbols
-    avg_train_max_dd = total_train_max_dd / valid_symbols
+    # Calculate combined metrics across all valid symbols
+    all_train_trades = []
+    all_test_trades = []
+    train_equity = 0
+    test_equity = 0
     
-    avg_test_pf = total_test_pf / valid_symbols
-    avg_test_win_rate = total_test_win_rate / valid_symbols
-    avg_test_return = total_test_return / valid_symbols
-    avg_test_trades = total_test_trades / valid_symbols
-    avg_test_max_dd = total_test_max_dd / valid_symbols
-    avg_test_days = total_test_days / valid_symbols
-    avg_test_cagr = total_test_cagr / valid_symbols
+    for symbol in valid_symbols:
+        symbol_data = results[symbol]
+        all_train_trades.extend(symbol_data['train'].get('trades', []))
+        all_test_trades.extend(symbol_data['test'].get('trades', []))
+        train_equity += symbol_data['train'].get('pnl', 0)
+        test_equity += symbol_data['test'].get('pnl', 0)
     
-    # Direct debug print to show if we found any trades
-    print(f"\nRESULTS SUMMARY:")
-    print(f"Valid symbols: {valid_symbols}")
-    print(f"Total training trades: {total_train_trades}")
-    print(f"Total testing trades: {total_test_trades}")
-    print(f"Avg trades per symbol (train): {avg_train_trades:.1f}")
-    print(f"Avg trades per symbol (test): {avg_test_trades:.1f}")
-    print(f"Avg return: {avg_test_return:.2f}%")
-    print(f"Avg profit factor: {avg_test_pf:.2f}")
-    print(f"------------------------------------")
+    # Calculate overall R-metrics
+    combined_train_r = calculate_r_multiples(all_train_trades)
+    combined_test_r = calculate_r_multiples(all_test_trades)
     
-    logger.debug(f"Found valid parameter set with {valid_symbols} symbols, avg test trades: {avg_test_trades:.1f}, avg profit: {avg_test_return:.2f}%")
+    # Calculate max drawdown in R units
+    train_max_dd = max([results[s]['train'].get('max_drawdown_pct', 0) for s in valid_symbols])
+    test_max_dd = max([results[s]['test'].get('max_drawdown_pct', 0) for s in valid_symbols])
     
-    # Return results
+    # Convert to R units (assuming risk_per_trade represents 1R)
+    train_max_dd_r = train_max_dd / param_set.get('risk_per_trade', 0.01)
+    test_max_dd_r = test_max_dd / param_set.get('risk_per_trade', 0.01)
+    
+    # Calculate R-based weighted score
+    train_score = combined_train_r['expectancy'] - 0.5 * train_max_dd_r
+    test_score = combined_test_r['expectancy'] - 0.5 * test_max_dd_r
+    
     return {
-        'params': param_set,
-        'symbol_results': symbol_results,
-        'avg_train_pf': avg_train_pf,
-        'avg_train_win_rate': avg_train_win_rate,
-        'avg_train_return': avg_train_return,
-        'avg_train_trades': avg_train_trades,
-        'avg_train_max_dd': avg_train_max_dd,
-        
-        'avg_test_pf': avg_test_pf,
-        'avg_test_win_rate': avg_test_win_rate,
-        'avg_test_return': avg_test_return,
-        'avg_test_trades': avg_test_trades,
-        'avg_test_max_dd': avg_test_max_dd,
-        'avg_test_days': avg_test_days,
-        'avg_test_cagr': avg_test_cagr,
+        'param_set': param_set,
+        'valid_symbols': valid_symbols,
+        'num_symbols': len(valid_symbols),
+        'symbol_results': results,
+        'all_train_trades': all_train_trades,
+        'all_test_trades': all_test_trades,
+        'train_r_metrics': combined_train_r,
+        'test_r_metrics': combined_test_r,
+        'train_max_dd_r': train_max_dd_r,
+        'test_max_dd_r': test_max_dd_r,
+        'train_equity': train_equity,
+        'test_equity': test_equity,
+        'train_score': train_score,
+        'test_score': test_score,
+        'avg_train_trades': len(all_train_trades) / len(valid_symbols),
+        'avg_test_trades': len(all_test_trades) / len(valid_symbols)
     }
 
 if __name__ == "__main__":
