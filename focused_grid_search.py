@@ -106,7 +106,7 @@ def focused_grid_search():
     # Additional optimization parameters
     breakeven_trigger_r_range = [0.5, 1.0, 1.2]  # R multiples to trigger breakeven
     initial_trail_mult_range = [1.25, 1.5, 2.0]  # Initial trail ATR multiplier
-    tp_multiplier_range = [None, 3, 4]  # Take profit multiplier (None for trail only)
+    tp_multiplier_range = [None, 3, 4, 6]  # Take profit multiplier (None for trail only)
     min_hold_bars_range = [0, 3]  # Minimum bars to hold a position
     
     # Generate all parameter combinations

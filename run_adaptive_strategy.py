@@ -350,7 +350,8 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
         if 'equity_curve' in strategy_results:
             # Store the equity curve and dates for later plotting
             if combined_equity_curve is None:
-                combined_equity_curve = np.array(strategy_results['equity_curve'])
+                # Make sure it's a float array to avoid integer casting issues
+                combined_equity_curve = np.array(strategy_results['equity_curve'], dtype=np.float64)
                 # Make sure to use the correct number of dates that match the equity curve
                 equity_dates = df_with_indicators.index[-len(strategy_results['equity_curve']):]
                 combined_equity_dates = equity_dates
@@ -368,9 +369,11 @@ def run_backtest(symbols, timeframe, days, initial_balance, params=None):
                     equity_dates = equity_dates[-min_len:]
                     combined_equity_dates = combined_equity_dates[-min_len:]
                     combined_equity_curve = combined_equity_curve[-min_len:]
-                    normalized_curve = np.array(strategy_results['equity_curve'][-min_len:]) * norm_factor * weight
+                    # Ensure float dtype to avoid integer casting issues
+                    normalized_curve = np.array(strategy_results['equity_curve'][-min_len:], dtype=np.float64) * norm_factor * weight
                 else:
-                    normalized_curve = np.array(strategy_results['equity_curve']) * norm_factor * weight
+                    # Ensure float dtype to avoid integer casting issues
+                    normalized_curve = np.array(strategy_results['equity_curve'], dtype=np.float64) * norm_factor * weight
                 
                 # Add to the existing curve
                 combined_equity_curve += normalized_curve
