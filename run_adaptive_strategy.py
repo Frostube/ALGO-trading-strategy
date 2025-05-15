@@ -2,490 +2,251 @@
 """
 Adaptive Strategy Runner
 
-This script runs the enhanced EMA crossover strategy with self-tuning capabilities,
-including parameter optimization, health monitoring, and dynamic risk management.
-
-Features:
-- Parameter auto-optimization from recent data
-- Walk-forward validation to prevent overfitting
-- Live strategy health monitoring
-- Volatility-targeted position sizing
-- Global portfolio risk cap
-- Multi-asset support
-
-Usage:
-    python run_adaptive_strategy.py --symbols "BTC/USDT,ETH/USDT" --mode backtest
+This script runs the trading strategy with adaptive parameters based on market conditions.
+The strategy parameters are adjusted based on volatility regimes.
 """
 import argparse
-import os
-import sys
+import time
 import json
-import numpy as np
-import matplotlib.pyplot as plt
-from datetime import datetime, timedelta
-from pathlib import Path
 import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import matplotlib.pyplot as plt
+import os
+from pathlib import Path
 
-# Add root directory to path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from src.data.data_loader import load_data
-from src.data.fetcher import fetch_ohlcv, DataFetcher
+# Local imports
+from src.utils.logger import logger, setup_logger
 from src.strategy.ema_crossover import EMACrossoverStrategy
-from src.backtest.backtest import Backtester, MockAccount
-from src.utils.logger import logger
-from src.strategy.health_monitor import HealthMonitor
 from src.risk.portfolio_manager import PortfolioRiskManager
+from src.strategy.health_monitor import HealthMonitor
+from src.utils.metrics import calculate_metrics, plot_equity_curve, plot_drawdown_curve
+from src.backtest.backtest import Backtester
+from src.data.fetcher import fetch_ohlcv
 from src.utils.notification import send_notification
 from src.strategy.strategy_factory import StrategyFactory
-from src.utils.metrics import profit_factor, win_rate
+
+# Default parameters
+DEFAULT_SYMBOLS = ["BTC/USDT"]
+DEFAULT_TIMEFRAME = "4h"
+DEFAULT_DAYS = 90
+DEFAULT_RISK = 0.015  # 1.5% risk per trade
+DEFAULT_INITIAL_BALANCE = 10000
+DEFAULT_TARGET_VOL_USD = 200  # $200 daily volatility target
 
 def parse_args():
-    """Parse command line arguments."""
+    """Parse command line arguments"""
     parser = argparse.ArgumentParser(description='Run adaptive trading strategy')
-    parser.add_argument('--symbols', type=str, default="BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT",
-                       help='Comma-separated list of symbols to trade')
-    parser.add_argument('--timeframe', type=str, default="4h",
-                       help='Timeframe to use (default: 4h)')
-    parser.add_argument('--mode', type=str, choices=['live', 'paper', 'live-paper', 'backtest'], default='backtest',
-                       help='Trading mode (default: backtest)')
-    parser.add_argument('--days', type=int, default=90,
-                       help='Days of historical data for backtest (default: 90)')
-    parser.add_argument('--initial-balance', type=float, default=10000,
-                       help='Initial account balance (default: 10000)')
+    parser.add_argument('--mode', choices=['backtest', 'live', 'paper'], default='backtest',
+                        help='Trading mode: backtest, live, or paper trading')
+    parser.add_argument('--symbols', type=str, default=','.join(DEFAULT_SYMBOLS),
+                        help='Comma-separated list of trading symbols')
+    parser.add_argument('--timeframe', type=str, default=DEFAULT_TIMEFRAME,
+                        help='Trading timeframe')
+    parser.add_argument('--days', type=int, default=DEFAULT_DAYS,
+                        help='Number of days to backtest')
+    parser.add_argument('--risk-cap', type=float, default=DEFAULT_RISK,
+                        help='Risk cap per trade')
+    parser.add_argument('--initial-balance', type=float, default=DEFAULT_INITIAL_BALANCE,
+                        help='Initial account balance')
+    parser.add_argument('--params-file', type=str, default=None,
+                        help='JSON file containing strategy parameters')
+    parser.add_argument('--target-vol-usd', type=float, default=DEFAULT_TARGET_VOL_USD,
+                        help='Target daily volatility in USD for position sizing')
     parser.add_argument('--optimize', action='store_true',
-                       help='Run parameter optimization before trading')
-    parser.add_argument('--use_cached_params', action='store_true',
-                       help='Use only cached parameters from file, skip optimization')
-    parser.add_argument('--force_reopt', action='store_true',
-                       help='Force re-optimization even if cached parameters exist')
+                        help='Run parameter optimization before trading')
     parser.add_argument('--health-monitor', action='store_true',
-                       help='Enable health monitoring')
-    parser.add_argument('--risk-cap', type=float, default=0.015,
-                       help='Maximum portfolio risk cap (default: 0.015 = 1.5%%)')
+                        help='Enable health monitoring')
     parser.add_argument('--notifications', action='store_true',
-                       help='Enable notifications')
-    parser.add_argument('--log', action='store_true',
-                       help='Log results to docs/performance_log.md')
+                        help='Enable notifications')
     parser.add_argument('--debug', action='store_true',
-                       help='Enable debug logging')
+                        help='Enable debug logging')
+    
     return parser.parse_args()
 
-def load_optimized_params(symbol, timeframe):
+def optimize_parameters(symbol, timeframe="4h", days=90):
     """
-    Load optimized parameters for a given symbol and timeframe.
+    Run parameter optimization for a single symbol.
     
     Args:
         symbol: Trading pair symbol
         timeframe: Timeframe to use
+        days: Days of historical data to use
         
     Returns:
-        dict: Optimized parameters or None if not available
+        dict: Optimized parameters for the symbol
     """
-    # Format symbol for filename (replace / with _)
-    symbol_formatted = symbol.replace('/', '_')
-    params_file = Path(f"params/{symbol_formatted}_{timeframe}.json")
+    from src.optimization.optimizer import GridOptimizer
     
-    if not params_file.exists():
-        logger.warning(f"No optimized parameters found for {symbol} on {timeframe}")
+    logger.info(f"Optimizing parameters for {symbol} on {timeframe} timeframe...")
+    
+    # Fetch historical data
+    df = fetch_ohlcv(symbol, timeframe, days=days)
+    
+    if df is None or len(df) < 30:
+        logger.error(f"Insufficient data for {symbol}")
         return None
     
-    try:
-        # Check parameter file age
-        file_time = datetime.fromtimestamp(params_file.stat().st_mtime)
-        now = datetime.now()
-        age_days = (now - file_time).total_seconds() / (24 * 3600)
-        
-        logger.info(f"Params age: {age_days:.1f} d")
-        
-        # Warn and skip live trading if parameters are too old
-        if age_days > 2 and 'live' in sys.argv:
-            logger.warning(f"Parameters for {symbol} are older than 2 days ({age_days:.1f} days). Skipping live trading.")
-            logger.warning("Use --force_reopt to run optimization now.")
-            return None
-            
-        with open(params_file, 'r') as f:
-            params_list = json.load(f)
-            
-        if not params_list:
-            logger.warning(f"Empty parameters file for {symbol} on {timeframe}")
-            return None
-            
-        # Use the first parameter set (highest ranked)
-        params = params_list[0]
-        
-        # Add timestamp information if not already present
-        if 'meta' not in params:
-            params['meta'] = {}
-        
-        if 'optimized_date' not in params['meta']:
-            params['meta']['optimized_date'] = file_time.strftime('%Y-%m-%d')
-        
-        logger.info(f"Loaded optimized parameters for {symbol} on {timeframe}: "
-                   f"EMA {params.get('ema_fast', 'N/A')}/{params.get('ema_slow', 'N/A')}/{params.get('ema_trend', 'N/A')}, "
-                   f"ATR SL {params.get('atr_sl_multiplier', 'N/A')}")
-        
-        return params
-    except Exception as e:
-        logger.error(f"Error loading optimized parameters: {str(e)}")
-        return None
-
-def optimize_parameters(symbols, timeframe, days=550):
-    """
-    Run parameter optimization for the given symbols.
+    # Define parameter grid
+    param_grid = {
+        'ema_short': [5, 8, 13, 21],
+        'ema_long': [21, 34, 55, 89],
+        'atr_periods': [14, 21],
+        'atr_multiplier': [1.5, 2.0, 2.5, 3.0],
+        'rsi_periods': [14],
+        'rsi_overbought': [70],
+        'rsi_oversold': [30]
+    }
     
-    Args:
-        symbols: List of trading pair symbols
-        timeframe: Timeframe to use
-        days: Number of days of historical data to use
-        
-    Returns:
-        dict: Dictionary of optimized parameters by symbol
-    """
-    logger.info(f"Running parameter optimization for {len(symbols)} symbols on {timeframe} timeframe")
+    # Initialize optimizer
+    optimizer = GridOptimizer(param_grid)
     
-    # Import here to avoid circular imports
-    from src.optimization.daily_optimizer import optimize_symbol, save_params
+    # Run optimization
+    optimized_params = optimizer.optimize(df, symbol, timeframe)
     
-    optimized_params = {}
-    
-    for symbol in symbols:
-        try:
-            logger.info(f"Optimizing parameters for {symbol}...")
-            
-            # Run optimization
-            param_sets = optimize_symbol(symbol, timeframe, days)
-            
-            if param_sets:
-                # Save optimized parameters
-                save_params(symbol, timeframe, param_sets)
-                
-                # Store first (best) parameter set
-                optimized_params[symbol] = param_sets[0]
-                
-                logger.info(f"Optimization complete for {symbol}")
-            else:
-                logger.warning(f"No valid parameter sets found for {symbol}")
-        except Exception as e:
-            logger.error(f"Error optimizing parameters for {symbol}: {str(e)}")
+    logger.info(f"Optimized parameters for {symbol}: {optimized_params}")
     
     return optimized_params
 
-def run_backtest(symbols, timeframe, days, initial_balance, params=None):
+def run_backtest(symbols, timeframe, days, initial_balance, risk_cap=0.015, params=None, 
+                 target_vol_usd=DEFAULT_TARGET_VOL_USD, debug=False):
     """
-    Run a backtest for the given symbols.
+    Run backtest for the given symbols.
     
     Args:
         symbols: List of trading pair symbols
         timeframe: Timeframe to use
-        days: Number of days of historical data to use
+        days: Number of days to backtest
         initial_balance: Initial account balance
+        risk_cap: Maximum risk per trade
         params: Dictionary of parameters by symbol (optional)
+        target_vol_usd: Target daily volatility in USD for position sizing
+        debug: Whether to enable debug logging
         
     Returns:
         dict: Backtest results
     """
+    # Setup logger
+    setup_logger(debug=debug)
+    
     logger.info(f"Running backtest for {len(symbols)} symbols on {timeframe} timeframe "
-               f"over {days} days with ${initial_balance} initial balance")
+               f"over {days} days with ${initial_balance} initial balance "
+               f"and ${target_vol_usd} volatility target")
+    
+    # Create output directory for results
+    results_dir = Path("results")
+    if not results_dir.exists():
+        results_dir.mkdir(parents=True)
+    
+    # Create portfolio risk manager
+    portfolio_manager = PortfolioRiskManager(
+        account_equity=initial_balance,
+        risk_per_trade=risk_cap,
+        max_pos_pct=0.25,
+        max_portfolio_risk=0.05,
+        use_volatility_sizing=True,
+        target_vol_usd=target_vol_usd
+    )
+    
+    # Initialize backtester
+    backtester = Backtester(portfolio_manager=portfolio_manager, initial_balance=initial_balance)
     
     # Use provided parameters or load optimized parameters
     if params is None:
         params = {}
         for symbol in symbols:
-            symbol_params = load_optimized_params(symbol, timeframe)
-            
-            if symbol_params:
-                params[symbol] = symbol_params
+            # Try to load cached parameters
+            param_file = Path(f"params/{symbol.replace('/', '_')}.json")
+            if param_file.exists():
+                with open(param_file, 'r') as f:
+                    params[symbol] = json.load(f)
+                logger.info(f"Loaded cached parameters for {symbol}")
+            else:
+                # Use default parameters
+                params[symbol] = {
+                    'ema_short': 8,
+                    'ema_long': 21,
+                    'atr_periods': 14,
+                    'atr_multiplier': 2.0,
+                    'rsi_periods': 14,
+                    'rsi_overbought': 70,
+                    'rsi_oversold': 30
+                }
+                logger.info(f"Using default parameters for {symbol}")
     
-    # Default parameters if none available
-    default_params = {
-        'ema_fast': 10,
-        'ema_slow': 40,
-        'ema_trend': 200,
-        'atr_sl_multiplier': 1.0,
-        'enable_pyramiding': True,
-        'max_pyramid_entries': 2,
-        'pyramid_threshold': 0.5,
-        'pyramid_position_scale': 0.5,
-        'risk_per_trade': 0.0075,
-        'vol_target_pct': 0.0075,
-        'use_volatility_sizing': True,
-    }
+    # Create health monitor
+    health_monitor = HealthMonitor()
     
-    # Run backtests for each symbol individually
-    all_results = {}
-    total_trades = 0
-    combined_equity_curve = None
-    combined_equity_dates = None
-    health_alerts = []  # Track health monitor alerts
+    # Run backtest for each symbol
+    all_trades = []
+    equity_curves = {}
     
     for symbol in symbols:
-        logger.info(f"Running backtest for {symbol}...")
+        logger.info(f"Backtesting {symbol}...")
         
-        # Load data for this symbol
-        df = load_data(symbol=symbol, timeframe=timeframe, days=days)
+        # Fetch historical data
+        df = fetch_ohlcv(symbol, timeframe, days=days)
         
-        if df.empty:
-            logger.error(f"Failed to load data for {symbol}, skipping")
+        if df is None or len(df) < 30:
+            logger.error(f"Insufficient data for {symbol}")
             continue
-            
-        logger.info(f"Loaded {len(df)} candles for {symbol}")
         
         # Get parameters for this symbol
-        symbol_params = params.get(symbol, default_params)
+        symbol_params = params.get(symbol, {})
         
-        # Create health monitor for this symbol
-        health_monitor = HealthMonitor(
-            strategy_name="ema_crossover",
-            symbol=symbol,
-            window_size=40,  # Track last 40 trades
-            min_profit_factor=1.0,  # Minimum profit factor of 1.0
-            min_win_rate=0.35,  # Minimum win rate of 35%
-            notification_enabled=True
-        )
-        
-        # Create strategy with parameters
+        # Create strategy instance
         strategy = EMACrossoverStrategy(
             symbol=symbol,
             timeframe=timeframe,
-            account_balance=initial_balance,
-            auto_optimize=False,  # Don't auto-optimize when we already have parameters
-            fast_ema=symbol_params.get('ema_fast', 10),
-            slow_ema=symbol_params.get('ema_slow', 40),
-            trend_ema=symbol_params.get('ema_trend', 200),
-            atr_sl_multiplier=symbol_params.get('atr_sl_multiplier', 1.0),
-            risk_per_trade=symbol_params.get('risk_per_trade', 0.0075),
-            use_volatility_sizing=symbol_params.get('use_volatility_sizing', True),
-            vol_target_pct=symbol_params.get('vol_target_pct', 0.0075),
-            enable_pyramiding=symbol_params.get('enable_pyramiding', True),
-            max_pyramid_entries=symbol_params.get('max_pyramid_entries', 2),
-            health_monitor=health_monitor  # Add health monitor to strategy
+            ema_short=symbol_params.get('ema_short', 8),
+            ema_long=symbol_params.get('ema_long', 21),
+            atr_periods=symbol_params.get('atr_periods', 14),
+            atr_multiplier=symbol_params.get('atr_multiplier', 2.0),
+            rsi_periods=symbol_params.get('rsi_periods', 14),
+            rsi_overbought=symbol_params.get('rsi_overbought', 70),
+            rsi_oversold=symbol_params.get('rsi_oversold', 30)
         )
         
-        # Initialize backtester with data
-        backtester = Backtester(data=df, initial_balance=initial_balance)
-        
-        # Apply indicators
-        df_with_indicators = strategy.apply_indicators(df)
-        
-        # Create mock account
-        account = MockAccount(initial_balance=initial_balance, symbol=symbol)
-        strategy.set_account(account)
+        # Add indicators to data
+        df_with_indicators = strategy.add_indicators(df)
         
         # Run backtest
-        strategy_results = backtester._backtest_strategy(strategy, df_with_indicators)
+        symbol_results = backtester.backtest_strategy(strategy, df_with_indicators)
         
-        # Process trades through health monitor
-        if 'trades' in strategy_results:
-            for trade in strategy_results['trades']:
-                # Convert trade format to what health monitor expects
-                health_trade = {
-                    'pnl': trade['pnl'],
-                    'entry_time': trade['entry_time'],
-                    'exit_time': trade['exit_time'],
-                    'symbol': symbol
-                }
-                
-                # Process the trade
-                continue_trading = health_monitor.on_trade_closed(health_trade)
-                
-                if not continue_trading:
-                    pf = health_monitor.get_profit_factor()
-                    wr = health_monitor.get_win_rate()
-                    alert_msg = (f"⚠️ Health monitor triggered pause for {symbol}: "
-                               f"PF={pf:.2f}, Win={wr*100:.1f}%")
-                    logger.warning(alert_msg)
-                    health_alerts.append(alert_msg)
-        
-        # For testing: Inject synthetic trades into first symbol's health monitor
-        # This simulates a degraded strategy with declining performance to test health alerts
-        if symbol == symbols[0] and days == 30:  # Only for time-lapse test on first symbol
-            logger.info("Injecting test trade data to evaluate health monitor...")
+        if symbol_results and 'trades' in symbol_results:
+            # Process trades through health monitor
+            for trade in symbol_results['trades']:
+                health_monitor.add_trade(trade)
             
-            # Create a series of losing trades to trigger health monitor
-            test_trades = []
-            # Need at least the window size (40) trades for reliable monitoring
-            for i in range(45):
-                # Create a poor performance scenario: 25% win rate and poor profit factor
-                is_win = (i % 4 == 0)  # Every 4th trade is a winner (25% win rate)
-                pnl = 50 if is_win else -40  # Profit factor around 0.8
-                
-                trade = {
-                    'pnl': pnl,
-                    'entry_time': datetime.now() - timedelta(hours=i*4),
-                    'exit_time': datetime.now() - timedelta(hours=i*4-2),
-                    'symbol': symbol
-                }
-                
-                test_trades.append(trade)
-                
-                # Process each trade through health monitor
-                continue_trading = health_monitor.on_trade_closed(trade)
-                
-                # Check if health monitor would pause trading
-                if i >= 39:  # After we have enough trades to evaluate
-                    pf = health_monitor.get_profit_factor()
-                    wr = health_monitor.get_win_rate() * 100
-                    if not continue_trading:
-                        alert_msg = (f"⚠️ HEALTH MONITOR ALERT: Trading would pause for {symbol} due to: "
-                                   f"PF={pf:.2f} (min: {health_monitor.min_profit_factor:.2f}), "
-                                   f"Win={wr:.1f}% (min: {health_monitor.min_win_rate*100:.1f}%)")
-                        logger.warning(alert_msg)
-                        health_alerts.append(alert_msg)
-                    else:
-                        logger.info(f"Health metrics for {symbol}: PF={pf:.2f}, Win={wr:.1f}%")
-        
-        # Store results
-        all_results[symbol] = strategy_results
-        total_trades += strategy_results.get('total_trades', 0)
-        
-        # Print results for this symbol
-        logger.info(f"Backtest results for {symbol}:")
-        logger.info(f"  Return: {strategy_results.get('total_return', 0)*100:.2f}%")
-        logger.info(f"  Profit Factor: {strategy_results.get('profit_factor', 0):.2f}")
-        logger.info(f"  Win Rate: {strategy_results.get('win_rate', 0)*100:.2f}%")
-        logger.info(f"  Total Trades: {strategy_results.get('total_trades', 0)}")
-        
-        # Combine equity curves
-        if 'equity_curve' in strategy_results:
-            # Store the equity curve and dates for later plotting
-            if combined_equity_curve is None:
-                # Make sure it's a float array to avoid integer casting issues
-                combined_equity_curve = np.array(strategy_results['equity_curve'], dtype=np.float64)
-                # Make sure to use the correct number of dates that match the equity curve
-                equity_dates = df_with_indicators.index[-len(strategy_results['equity_curve']):]
-                combined_equity_dates = equity_dates
-            else:
-                # Normalize the current equity curve to match the combined one
-                weight = 1.0 / len(symbols)  # Equal weight for each symbol
-                norm_factor = initial_balance / strategy_results['equity_curve'][0]
-                
-                # Get the current dates matching the equity curve
-                equity_dates = df_with_indicators.index[-len(strategy_results['equity_curve']):]
-                
-                # If lengths differ, truncate to the shorter one
-                if len(equity_dates) != len(combined_equity_dates):
-                    min_len = min(len(equity_dates), len(combined_equity_dates))
-                    equity_dates = equity_dates[-min_len:]
-                    combined_equity_dates = combined_equity_dates[-min_len:]
-                    combined_equity_curve = combined_equity_curve[-min_len:]
-                    # Ensure float dtype to avoid integer casting issues
-                    normalized_curve = np.array(strategy_results['equity_curve'][-min_len:], dtype=np.float64) * norm_factor * weight
-                else:
-                    # Ensure float dtype to avoid integer casting issues
-                    normalized_curve = np.array(strategy_results['equity_curve'], dtype=np.float64) * norm_factor * weight
-                
-                # Add to the existing curve
-                combined_equity_curve += normalized_curve
+            # Add to overall results
+            all_trades.extend(symbol_results['trades'])
+            equity_curves[symbol] = symbol_results['equity_curve']
     
-    # Add summary of all symbols
-    all_results['summary'] = {
-        'total_trades': total_trades,
-        'symbols_tested': len(all_results) - 1,  # Excluding summary
-        'per_symbol_avg_trades': total_trades / max(1, len(all_results) - 1),
-        'health_alerts': health_alerts
-    }
-    
-    # Generate and save equity curve plot
-    if combined_equity_curve is not None:
-        generate_equity_plot(combined_equity_curve, combined_equity_dates, all_results, symbols, timeframe, days)
-    
-    return all_results
-
-def generate_equity_plot(equity_curve, dates, results, symbols, timeframe, days):
-    """
-    Generate and save an equity curve plot.
-    
-    Args:
-        equity_curve: Array of equity values
-        dates: Array of date values
-        results: Dictionary of backtest results
-        symbols: List of symbols in the backtest
-        timeframe: Timeframe used
-        days: Number of days in the backtest
-    """
-    try:
-        # Ensure reports directory exists
-        Path("reports").mkdir(exist_ok=True)
+    # Calculate overall metrics
+    if all_trades:
+        metrics = calculate_metrics(all_trades, initial_balance)
         
-        # Create plot figure
-        plt.figure(figsize=(12, 8))
+        # Plot results
+        plot_equity_curve(equity_curves, f"results/equity_curve_{datetime.now().strftime('%Y%m%d')}.png")
         
-        # Plot equity curve
-        plt.subplot(2, 1, 1)
-        plt.plot(dates, equity_curve, 'b-', linewidth=2)
-        plt.title(f'30-Day Time-Lapse Test Results - {timeframe} Timeframe')
-        plt.ylabel('Portfolio Equity ($)')
-        plt.grid(True)
-        
-        # Add annotations for key metrics
-        avg_return = 0
-        avg_win_rate = 0
-        profit_factor = 0
-        max_dd = 0
-        symbol_count = 0
-        
-        for key, result in results.items():
-            if key != 'summary':
-                symbol_count += 1
-                avg_return += result.get('total_return', 0) * 100  # Convert to percentage
-                avg_win_rate += result.get('win_rate', 0) * 100  # Convert to percentage
-                max_dd = max(max_dd, result.get('max_drawdown', 0) * 100)  # Convert to percentage
-                if result.get('profit_factor', 0) > profit_factor:
-                    profit_factor = result.get('profit_factor', 0)
-        
-        if symbol_count > 0:
-            avg_return /= symbol_count
-            avg_win_rate /= symbol_count
-        
-        # Calculate drawdown
-        drawdown = np.zeros_like(equity_curve)
-        peak = equity_curve[0]
-        for i, value in enumerate(equity_curve):
-            if value > peak:
-                peak = value
-            drawdown[i] = (peak - value) / peak * 100  # Convert to percentage
-        
-        # Plot drawdown
-        plt.subplot(2, 1, 2)
-        plt.plot(dates, drawdown, 'r-', linewidth=1.5)
-        plt.fill_between(dates, drawdown, alpha=0.3, color='r')
-        plt.title('Drawdown (%)')
-        plt.ylabel('Drawdown %')
-        plt.grid(True)
-        
-        # Add text with performance metrics
-        plt.figtext(0.02, 0.02, 
-                 f"Symbols: {', '.join(symbols)}\n"
-                 f"Timeframe: {timeframe}\n"
-                 f"Test Period: {days} days\n"
-                 f"Return: {avg_return:.2f}%\n"
-                 f"Profit Factor: {profit_factor:.2f}\n"
-                 f"Win Rate: {avg_win_rate:.2f}%\n"
-                 f"Max Drawdown: {max_dd:.2f}%\n"
-                 f"Total Trades: {results['summary'].get('total_trades', 0)}",
-                 fontsize=10, verticalalignment='bottom')
-        
-        # Highlight if health monitor triggered
-        if results['summary'].get('health_alerts'):
-            plt.figtext(0.5, 0.02, 
-                     "⚠️ HEALTH MONITOR ALERTS:\n" + 
-                     "\n".join(results['summary'].get('health_alerts', [])),
-                     fontsize=10, color='red', verticalalignment='bottom')
-        
-        # Save the plot
-        filename = f"reports/equity_{days}d.png"
-        plt.tight_layout(rect=[0, 0.08, 1, 0.96])  # Adjust to make room for text
-        plt.savefig(filename, dpi=120)
-        plt.close()
-        
-        logger.info(f"Equity curve plot saved to {filename}")
-    except Exception as e:
-        logger.error(f"Error generating equity plot: {str(e)}")
+        # Return metrics
+        return metrics
+    else:
+        logger.warning("No trades generated in backtest")
+        return {
+            'net_profit': 0,
+            'net_profit_pct': 0,
+            'max_drawdown': 0,
+            'win_rate': 0,
+            'sharpe_ratio': 0,
+            'sortino_ratio': 0,
+            'profit_factor': 0,
+            'avg_r_multiple': 0
+        }
 
 def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015, 
                   enable_health_monitor=True, paper_mode=True, enable_notifications=False,
-                  params=None):
+                  target_vol_usd=DEFAULT_TARGET_VOL_USD, params=None):
     """
     Run live or paper trading for the given symbols.
     
@@ -497,272 +258,143 @@ def run_live_trading(symbols, timeframe, initial_balance, risk_cap=0.015,
         enable_health_monitor: Whether to enable health monitoring
         paper_mode: Whether to use paper trading
         enable_notifications: Whether to enable notifications
+        target_vol_usd: Target daily volatility in USD for position sizing
         params: Dictionary of parameters by symbol (optional)
         
     Returns:
         None
     """
-    from src.exchange.exchange_client import ExchangeClient
-    from src.strategy.ema_crossover import EMACrossoverStrategy
-    from src.risk.portfolio_manager import PortfolioRiskManager
-    from src.utils.notification import send_notification
-    from src.trading.order_manager import OrderManager
-    from src.strategy.health_monitor import HealthMonitor
+    from src.live.trader import LiveTrader
+    from src.exchange.exchange import Exchange
     
-    logger.info(f"Starting {'paper' if paper_mode else 'live'} trading "
-               f"for {len(symbols)} symbols on {timeframe} timeframe...")
+    # Setup logger
+    setup_logger(debug=True)
+    
+    # Create exchange connection
+    exchange = Exchange(paper_mode=paper_mode)
+    
+    # Create portfolio risk manager
+    portfolio_manager = PortfolioRiskManager(
+        account_equity=initial_balance,
+        risk_per_trade=risk_cap,
+        max_pos_pct=0.25,
+        max_portfolio_risk=0.05,
+        max_correlated_risk=risk_cap * 1.5,
+        use_volatility_sizing=True,
+        target_vol_usd=target_vol_usd
+    )
+    
+    # Create health monitor if enabled
+    health_monitor = HealthMonitor() if enable_health_monitor else None
     
     # Use provided parameters or load optimized parameters
     if params is None:
         params = {}
         for symbol in symbols:
-            symbol_params = load_optimized_params(symbol, timeframe)
-            
-            if symbol_params:
-                params[symbol] = symbol_params
+            # Try to load cached parameters
+            param_file = Path(f"params/{symbol.replace('/', '_')}.json")
+            if param_file.exists():
+                with open(param_file, 'r') as f:
+                    params[symbol] = json.load(f)
+                logger.info(f"Loaded cached parameters for {symbol}")
+            else:
+                # Use default parameters
+                params[symbol] = {
+                    'ema_short': 8,
+                    'ema_long': 21,
+                    'atr_periods': 14,
+                    'atr_multiplier': 2.0,
+                    'rsi_periods': 14,
+                    'rsi_overbought': 70,
+                    'rsi_oversold': 30
+                }
+                logger.info(f"Using default parameters for {symbol}")
     
-    # Initialize exchange client
-    exchange = ExchangeClient(paper_mode=paper_mode)
-    
-    # Initialize portfolio risk manager
-    risk_manager = PortfolioRiskManager(
-        account_equity=initial_balance,
-        risk_per_trade=risk_cap / 3,  # Use 1/3 of the risk cap per trade
-        max_portfolio_risk=risk_cap,
-        max_correlated_risk=risk_cap * 1.5,
-        use_volatility_sizing=True
-    )
-    
-    # Initialize order manager
-    order_manager = OrderManager(exchange, risk_manager)
-    
-    # Initialize health monitor if enabled
-    health_monitor = None
-    if enable_health_monitor:
-        health_monitor = HealthMonitor(
-            expected_win_rate=0.4,
-            expected_avg_win_loss_ratio=1.5,
-            underperformance_threshold=0.3
-        )
-    
-    # Initialize strategies
+    # Create strategy instances
     strategies = {}
     for symbol in symbols:
-        # Get parameters for symbol or use default
         symbol_params = params.get(symbol, {})
         
-        # Create strategy with parameters
-        strategies[symbol] = EMACrossoverStrategy(
+        # Create strategy
+        strategy = EMACrossoverStrategy(
             symbol=symbol,
-            ema_fast=symbol_params.get('ema_fast', 8),
-            ema_slow=symbol_params.get('ema_slow', 21),
-            ema_trend=symbol_params.get('ema_trend', 55),
-            rsi_period=symbol_params.get('rsi_period', 14),
-            atr_period=symbol_params.get('atr_period', 14),
-            atr_multiplier=symbol_params.get('atr_sl_multiplier', 1.5),
-            risk_per_trade=risk_cap / 3,
-            enable_dynamic_exits=True
+            timeframe=timeframe,
+            ema_short=symbol_params.get('ema_short', 8),
+            ema_long=symbol_params.get('ema_long', 21),
+            atr_periods=symbol_params.get('atr_periods', 14),
+            atr_multiplier=symbol_params.get('atr_multiplier', 2.0),
+            rsi_periods=symbol_params.get('rsi_periods', 14),
+            rsi_overbought=symbol_params.get('rsi_overbought', 70),
+            rsi_oversold=symbol_params.get('rsi_oversold', 30)
         )
         
-        # Fetch data needed for strategy
-        logger.info(f"Fetching data for {symbol}...")
-        df = fetch_ohlcv(symbol, timeframe, limit=500)
-        
-        # Initialize data
-        strategies[symbol].init_data(df)
-        
-        # Update volatility regime
-        risk_manager.vol_monitor.update_regime(symbol, df)
-        
-        # Log current volatility regime
-        regime_info = {
-            'symbol': symbol,
-            'volatility': risk_manager.vol_monitor.realized_vol_pct(symbol),
-            'regime': risk_manager.vol_monitor.current_regimes.get(symbol, 'UNKNOWN')
-        }
-        logger.info(f"Volatility regime for {symbol}: {regime_info['regime']} "
-                   f"(vol: {regime_info['volatility']:.2f}%)")
-        
-        # Adjust risk according to volatility regime
-        risk_adj = risk_manager.vol_monitor.get_risk_adjustment(symbol)
-        logger.info(f"Risk adjustment for {symbol}: {risk_adj:.2f}x base risk")
-        
-        # Set strategy parameters based on regime
-        strategies[symbol].enable_pyramiding = risk_manager.vol_monitor.should_enable_pyramiding(symbol)
-        
-    # Start trading loop
-    logger.info("Starting trading loop...")
-
-def log_performance_to_file(results, symbols, timeframe, days):
-    """
-    Log backtest performance results to docs/performance_log.md.
+        strategies[symbol] = strategy
     
-    Args:
-        results: Dictionary of backtest results
-        symbols: List of symbols that were backtested
-        timeframe: Timeframe used for the backtest
-        days: Number of days of data used for the backtest
-    """
-    log_file = Path("docs/performance_log.md")
+    # Create and run live trader
+    trader = LiveTrader(
+        exchange=exchange,
+        portfolio_manager=portfolio_manager,
+        strategies=strategies,
+        timeframe=timeframe,
+        health_monitor=health_monitor,
+        enable_notifications=enable_notifications
+    )
     
-    # Create directory if it doesn't exist
-    log_file.parent.mkdir(parents=True, exist_ok=True)
-    
-    # Create the file with headers if it doesn't exist
-    if not log_file.exists():
-        with open(log_file, 'w') as f:
-            f.write("# Performance Log\n\n")
-            f.write("| Date | Symbols | Timeframe | Days | Total Return | Profit Factor | Win Rate | Max DD | Trades | Notes |\n")
-            f.write("|------|---------|-----------|------|--------------|---------------|----------|--------|--------|---------|\n")
-    
-    # Calculate summary metrics across all symbols
-    total_trades = 0
-    total_return = 0
-    total_win_rate = 0
-    max_dd = 0
-    profit_factor = 0
-    
-    symbol_count = 0
-    
-    for key, result in results.items():
-        if key != 'summary':
-            symbol_count += 1
-            total_trades += result.get('total_trades', 0)
-            total_return += result.get('total_return', 0) * 100  # Convert to percentage
-            total_win_rate += result.get('win_rate', 0) * 100  # Convert to percentage
-            max_dd = max(max_dd, result.get('max_drawdown', 0) * 100)  # Convert to percentage
-            if result.get('profit_factor', 0) > profit_factor:
-                profit_factor = result.get('profit_factor', 0)
-    
-    # Calculate averages
-    if symbol_count > 0:
-        avg_return = total_return / symbol_count
-        avg_win_rate = total_win_rate / symbol_count
-    else:
-        avg_return = 0
-        avg_win_rate = 0
-    
-    # Format the date
-    today = datetime.now().strftime('%Y-%m-%d')
-    
-    # Format the symbols
-    symbols_str = ", ".join(symbols)
-    if len(symbols_str) > 20:
-        symbols_str = f"{len(symbols)} symbols"
-    
-    # Check for health alerts
-    notes = ""
-    if 'summary' in results and results['summary'].get('health_alerts'):
-        notes = "⚠️ Health alerts triggered"
-    
-    # Append the new entry (add Notes column)
-    with open(log_file, 'a') as f:
-        f.write(f"| {today} | {symbols_str} | {timeframe} | {days} | {avg_return:.2f}% | {profit_factor:.2f} | {avg_win_rate:.2f}% | {max_dd:.2f}% | {total_trades} | {notes} |\n")
-    
-    logger.info(f"Performance logged to {log_file}")
+    # Run trading loop
+    trader.run_trading_loop()
 
 def run_adaptive_strategy():
-    """Main function to run the adaptive trading strategy."""
+    """Run the adaptive trading strategy"""
     args = parse_args()
     
-    # Configure logging
-    if args.debug:
-        logger.setLevel('DEBUG')
-    
-    # Parse symbols list
+    # Parse symbols
     symbols = args.symbols.split(',')
     
-    # Show current configuration
-    logger.info(f"Configuration:")
-    logger.info(f"- Symbols: {symbols}")
-    logger.info(f"- Timeframe: {args.timeframe}")
+    # Load params from file if provided
+    params = None
+    if args.params_file:
+        with open(args.params_file, 'r') as f:
+            params = json.load(f)
+    
+    # Log configuration
+    logger.info("Running adaptive trading strategy with configuration:")
     logger.info(f"- Mode: {args.mode}")
+    logger.info(f"- Symbols: {args.symbols}")
+    logger.info(f"- Timeframe: {args.timeframe}")
     logger.info(f"- Initial balance: ${args.initial_balance}")
     logger.info(f"- Risk cap: {args.risk_cap*100:.2f}%")
-    logger.info(f"- Optimization: {'Enabled' if args.optimize else 'Disabled'}")
+    logger.info(f"- Target volatility: ${args.target_vol_usd:.2f}")
     logger.info(f"- Health monitor: {'Enabled' if args.health_monitor else 'Disabled'}")
-    logger.info(f"- Notifications: {'Enabled' if args.notifications else 'Disabled'}")
-    
-    # Check for volatility regime monitoring capability
-    try:
-        from src.risk.vol_regime_switch import VolatilityRegimeMonitor
-        logger.info("- Volatility regime monitoring: Enabled")
-    except ImportError:
-        logger.warning("- Volatility regime monitoring: Not available")
-    
-    # Make sure all symbols are valid
-    for symbol in symbols:
-        if '/' not in symbol:
-            logger.error(f"Invalid symbol format: {symbol} (should be like 'BTC/USDT')")
-            return
     
     # Run in selected mode
     if args.mode == 'backtest':
-        results = run_backtest(symbols, args.timeframe, args.days, args.initial_balance)
+        results = run_backtest(symbols, args.timeframe, args.days, args.initial_balance, 
+                              args.risk_cap, params, args.target_vol_usd, args.debug)
         
-        # Print summary results
-        if results:
-            logger.info("Backtest completed. Summary:")
-            
-            # Get the summary data
-            if 'summary' in results:
-                summary = results['summary']
-                logger.info(f"Total trades across all symbols: {summary.get('total_trades', 0)}")
-                logger.info(f"Symbols tested: {summary.get('symbols_tested', 0)}")
-                logger.info(f"Average trades per symbol: {summary.get('per_symbol_avg_trades', 0):.1f}")
-                
-                # Calculate overall metrics
-                total_return = 0
-                winning_symbols = 0
-                
-                for key, result in results.items():
-                    if key != 'summary':  # Skip the summary entry
-                        symbol_return = result.get('total_return', 0) * 100
-                        total_return += symbol_return
-                        if symbol_return > 0:
-                            winning_symbols += 1
-                
-                # Calculate average return across symbols
-                if summary.get('symbols_tested', 0) > 0:
-                    avg_return = total_return / summary.get('symbols_tested', 1)
-                    logger.info(f"Average return: {avg_return:.2f}%")
-                    logger.info(f"Winning symbols: {winning_symbols}/{summary.get('symbols_tested', 0)}")
-                    
-                # Show health monitor alerts
-                if summary.get('health_alerts'):
-                    logger.warning("Health monitor alerts triggered:")
-                    for alert in summary.get('health_alerts', []):
-                        logger.warning(f"  {alert}")
-                
-                # Log performance to file if requested
-                if args.log:
-                    log_performance_to_file(results, symbols, args.timeframe, args.days)
-                    
-                # Print where to find the equity plot
-                logger.info(f"Equity curve plot saved to reports/equity_{args.days}d.png")
+        # Print summary
+        print("\nBacktest Results Summary:")
+        print(f"Net Profit: ${results['net_profit']:.2f} ({results['net_profit_pct']:.2f}%)")
+        print(f"Max Drawdown: {results['max_drawdown']:.2f}%")
+        print(f"Win Rate: {results['win_rate']:.2f}%")
+        print(f"Sharpe Ratio: {results['sharpe_ratio']:.2f}")
+        print(f"Sortino Ratio: {results['sortino_ratio']:.2f}")
+        print(f"Profit Factor: {results['profit_factor']:.2f}")
+        print(f"Average R-Multiple: {results.get('avg_r_multiple', 0):.2f}")
     
-    elif args.mode in ['paper', 'live-paper']:
-        logger.info("Starting paper trading mode")
-        run_live_trading(symbols, args.timeframe, args.initial_balance, 
-                        risk_cap=args.risk_cap,
-                        enable_health_monitor=args.health_monitor,
-                        paper_mode=True,
-                        enable_notifications=args.notifications)
+    elif args.mode == 'paper':
+        run_live_trading(symbols, args.timeframe, args.initial_balance, args.risk_cap,
+                      args.health_monitor, True, args.notifications, 
+                      args.target_vol_usd, params)
     
     elif args.mode == 'live':
-        confirm = input("WARNING: You are about to start LIVE trading. Type 'CONFIRM' to continue: ")
-        
-        if confirm == 'CONFIRM':
-            run_live_trading(symbols, args.timeframe, args.initial_balance, 
-                            risk_cap=args.risk_cap,
-                            enable_health_monitor=args.health_monitor,
-                            paper_mode=False,
-                            enable_notifications=args.notifications)
+        # Confirm before live trading
+        confirm = input("Are you sure you want to run live trading? This will use real funds. (y/n): ")
+        if confirm.lower() == 'y':
+            run_live_trading(symbols, args.timeframe, args.initial_balance, args.risk_cap,
+                          args.health_monitor, False, args.notifications,
+                          args.target_vol_usd, params)
         else:
             logger.warning("Live trading mode not confirmed. Exiting.")
-    
-    elif args.mode == 'adaptive':
-        run_adaptive_strategy()
-    
+
 if __name__ == "__main__":
     run_adaptive_strategy() 

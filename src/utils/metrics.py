@@ -6,6 +6,10 @@ This module provides utility functions for calculating various trading and perfo
 
 import numpy as np
 import logging
+import matplotlib.pyplot as plt
+import os
+from datetime import datetime
+import pandas as pd
 
 # Minimum loss threshold to avoid division by very small numbers when calculating profit factor
 MIN_LOSS = 0.01  # USD
@@ -301,4 +305,403 @@ def calculate_expectancy(trades):
         'avg_win': avg_win,
         'avg_loss': avg_loss,
         'trades_count': len(pnl_series)
-    } 
+    }
+
+def plot_r_multiple_distribution(trades, output_path='reports/r_multiple_dist.png'):
+    """
+    Create a visual distribution plot of R-multiples from a list of trades.
+    
+    Args:
+        trades (list): List of trade dictionaries containing 'r_multiple' key
+        output_path (str): Path to save the visualization
+    
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if not trades:
+        logger.warning("No trades provided for R-multiple distribution plot")
+        return False
+    
+    # Extract R-multiples
+    r_values = [t.get('r_multiple', 0) for t in trades if 'r_multiple' in t]
+    
+    if not r_values:
+        logger.warning("No R-multiple values found in trades")
+        return False
+    
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Create histogram
+    plt.figure(figsize=(12, 8))
+    
+    # Histogram with transparency
+    n, bins, patches = plt.hist(r_values, bins=30, alpha=0.7, color='skyblue', edgecolor='black')
+    
+    # Calculate key statistics
+    avg_r = np.mean(r_values)
+    median_r = np.median(r_values)
+    std_r = np.std(r_values)
+    min_r = min(r_values)
+    max_r = max(r_values)
+    
+    # Calculate win rate and profit factor
+    wins = [r for r in r_values if r > 0]
+    losses = [r for r in r_values if r <= 0]
+    win_rate = len(wins) / len(r_values) if r_values else 0
+    
+    # Calculate percentage of trades >= 2R and >= 5R
+    pct_over_2r = len([r for r in r_values if r >= 2.0]) / len(r_values) if r_values else 0
+    pct_over_5r = len([r for r in r_values if r >= 5.0]) / len(r_values) if r_values else 0
+    
+    # Add vertical lines for key metrics
+    plt.axvline(x=0, color='red', linestyle='--', linewidth=1, label='Breakeven')
+    plt.axvline(x=avg_r, color='green', linestyle='-', linewidth=2, label=f'Mean: {avg_r:.2f}R')
+    plt.axvline(x=median_r, color='blue', linestyle=':', linewidth=2, label=f'Median: {median_r:.2f}R')
+    
+    # Customize plot
+    plt.title(f'Distribution of R-Multiples ({len(r_values)} trades)', fontsize=16)
+    plt.xlabel('R-Multiple (Profit/Loss in Risk Units)', fontsize=12)
+    plt.ylabel('Frequency', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    
+    # Add text box with statistics
+    stats_text = (
+        f"Total Trades: {len(r_values)}\n"
+        f"Win Rate: {win_rate:.2%}\n"
+        f"Avg R-Multiple: {avg_r:.2f}R\n"
+        f"Median R: {median_r:.2f}R\n"
+        f"Std Dev: {std_r:.2f}\n"
+        f"Range: [{min_r:.2f}R, {max_r:.2f}R]\n"
+        f"Trades ≥ 2R: {pct_over_2r:.2%}\n"
+        f"Trades ≥ 5R: {pct_over_5r:.2%}"
+    )
+    
+    plt.annotate(stats_text, xy=(0.05, 0.95), xycoords='axes fraction',
+                 bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8),
+                 va='top', fontsize=10)
+    
+    plt.legend()
+    plt.tight_layout()
+    
+    # Save plot
+    try:
+        plt.savefig(output_path, dpi=300)
+        plt.close()
+        logger.info(f"R-multiple distribution plot saved to {output_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving R-multiple plot: {str(e)}")
+        return False
+
+def plot_equity_curve_with_r_multiples(equity_curve, trades, output_path='reports/equity_r_multiple.png'):
+    """
+    Plot equity curve with R-multiple annotations for major winning trades.
+    
+    Args:
+        equity_curve (pd.Series): Equity curve with timestamps as index
+        trades (list): List of trade dictionaries with r_multiple, entry_time and exit_time
+        output_path (str): Path to save the visualization
+        
+    Returns:
+        bool: True if successful, False otherwise
+    """
+    if equity_curve is None or len(equity_curve) == 0:
+        logger.warning("No equity curve data provided")
+        return False
+    
+    if not trades:
+        logger.warning("No trades provided for R-multiple annotations")
+        return False
+        
+    # Create directory if it doesn't exist
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    
+    # Filter trades with R-multiple info and significant winners (>=2R)
+    significant_trades = [t for t in trades if t.get('r_multiple', 0) >= 2.0 and 'exit_time' in t]
+    
+    # Create plot
+    plt.figure(figsize=(15, 10))
+    
+    # Plot equity curve
+    plt.plot(equity_curve.index, equity_curve.values, label='Equity', linewidth=2)
+    
+    # Annotate significant winning trades
+    for trade in significant_trades:
+        # Get the exit time and find the closest point on the equity curve
+        exit_time = trade.get('exit_time')
+        if isinstance(exit_time, str):
+            # Try to convert string to datetime if needed
+            try:
+                exit_time = datetime.fromisoformat(exit_time.replace('Z', '+00:00'))
+            except:
+                continue
+        
+        # Find closest point to the exit time
+        try:
+            idx = equity_curve.index.get_indexer([exit_time], method='nearest')[0]
+            x = equity_curve.index[idx]
+            y = equity_curve.iloc[idx]
+            
+            # Annotate with R-multiple
+            r_multiple = trade.get('r_multiple', 0)
+            plt.scatter(x, y, color='green', s=100, zorder=5)
+            plt.annotate(f"+{r_multiple:.1f}R", 
+                         xy=(x, y),
+                         xytext=(10, 10),
+                         textcoords='offset points',
+                         bbox=dict(boxstyle="round,pad=0.3", fc="yellow", alpha=0.8),
+                         arrowprops=dict(arrowstyle="->", color="black"))
+        except Exception as e:
+            logger.debug(f"Error annotating trade: {str(e)}")
+            continue
+    
+    # Calculate drawdowns
+    drawdowns = []
+    peak = equity_curve.iloc[0]
+    for value in equity_curve:
+        if value > peak:
+            peak = value
+        drawdown = (peak - value) / peak * 100  # as percentage
+        drawdowns.append(drawdown)
+    
+    # Plot drawdowns on secondary axis
+    ax2 = plt.gca().twinx()
+    ax2.fill_between(equity_curve.index, drawdowns, 0, alpha=0.3, color='red', label='Drawdown')
+    ax2.set_ylabel('Drawdown %', color='red')
+    ax2.set_ylim(0, max(drawdowns) * 1.2)  # Set y-axis limit with some headroom
+    ax2.invert_yaxis()  # Invert so drawdowns go down
+    
+    # Customize plot
+    plt.title('Equity Curve with Significant Winning Trades (≥2R)', fontsize=16)
+    plt.xlabel('Date', fontsize=12)
+    plt.ylabel('Equity ($)', fontsize=12)
+    plt.grid(True, alpha=0.3)
+    plt.legend()
+    
+    # Format x-axis dates
+    plt.gcf().autofmt_xdate()
+    
+    # Add key metrics as text
+    total_return = (equity_curve.iloc[-1] / equity_curve.iloc[0] - 1) * 100
+    max_dd = max(drawdowns)
+    win_trades = len([t for t in trades if t.get('r_multiple', 0) > 0])
+    loss_trades = len([t for t in trades if t.get('r_multiple', 0) <= 0])
+    win_rate = win_trades / (win_trades + loss_trades) if (win_trades + loss_trades) > 0 else 0
+    
+    stats_text = (
+        f"Total Return: {total_return:.2f}%\n"
+        f"Max Drawdown: {max_dd:.2f}%\n"
+        f"Win Rate: {win_rate:.2%}\n"
+        f"Trades: {win_trades + loss_trades} ({win_trades}W/{loss_trades}L)"
+    )
+    
+    plt.annotate(stats_text, xy=(0.02, 0.02), xycoords='axes fraction',
+                 bbox=dict(boxstyle="round,pad=0.5", facecolor="white", alpha=0.8),
+                 va='bottom', fontsize=10)
+    
+    plt.tight_layout()
+    
+    # Save plot
+    try:
+        plt.savefig(output_path, dpi=300)
+        plt.close()
+        logger.info(f"Equity curve with R-multiples plot saved to {output_path}")
+        return True
+    except Exception as e:
+        logger.error(f"Error saving equity curve plot: {str(e)}")
+        return False
+
+def calculate_metrics(trades, initial_balance=10000.0):
+    """
+    Calculate comprehensive trading metrics from a list of trades.
+    
+    Args:
+        trades: List of trade dictionaries
+        initial_balance: Initial account balance
+        
+    Returns:
+        dict: Dictionary of calculated metrics
+    """
+    if not trades:
+        return {
+            'net_profit': 0,
+            'net_profit_pct': 0,
+            'max_drawdown': 0,
+            'win_rate': 0,
+            'sharpe_ratio': 0,
+            'sortino_ratio': 0,
+            'profit_factor': 0,
+            'avg_r_multiple': 0,
+            'expectancy': 0,
+            'total_trades': 0
+        }
+    
+    # Extract winning and losing trades
+    winners = [t for t in trades if t.get('pnl', 0) > 0]
+    losers = [t for t in trades if t.get('pnl', 0) <= 0]
+    
+    # Calculate basic metrics
+    win_count = len(winners)
+    loss_count = len(losers)
+    total_trades = win_count + loss_count
+    
+    # Calculate win amounts and loss amounts
+    win_amounts = [t.get('pnl', 0) for t in winners]
+    loss_amounts = [t.get('pnl', 0) for t in losers]
+    
+    # Calculate win rate
+    win_rate_val = win_rate(winners, losers) * 100
+    
+    # Calculate profit factor
+    pf = profit_factor(win_amounts, loss_amounts)
+    
+    # Calculate net profit
+    net_profit = sum(win_amounts) + sum(loss_amounts)
+    net_profit_pct = (net_profit / initial_balance) * 100
+    
+    # Calculate R-multiple metrics
+    r_metrics = calculate_r_multiples(trades)
+    avg_r = r_metrics.get('avg_r', 0)
+    expectancy = r_metrics.get('expectancy', 0)
+    
+    # Calculate equity curve
+    equity_curve = [initial_balance]
+    equity = initial_balance
+    
+    # Sort trades by time if available
+    if all('entry_time' in t for t in trades):
+        sorted_trades = sorted(trades, key=lambda x: x['entry_time'])
+    else:
+        sorted_trades = trades
+    
+    for trade in sorted_trades:
+        pnl = trade.get('pnl', 0)
+        equity += pnl
+        equity_curve.append(equity)
+    
+    # Calculate drawdown
+    max_dd = drawdown(equity_curve) * 100
+    
+    # Calculate Sharpe and Sortino ratios
+    returns = []
+    for i in range(1, len(equity_curve)):
+        ret = (equity_curve[i] - equity_curve[i-1]) / equity_curve[i-1]
+        returns.append(ret)
+    
+    if returns:
+        mean_return = np.mean(returns)
+        std_return = np.std(returns)
+        
+        # Only negative returns for Sortino ratio
+        neg_returns = [r for r in returns if r < 0]
+        downside_std = np.std(neg_returns) if neg_returns else 1e-6
+        
+        # Annualized ratios (assuming daily returns)
+        sharpe = (mean_return / std_return) * np.sqrt(252) if std_return > 0 else 0
+        sortino = (mean_return / downside_std) * np.sqrt(252) if downside_std > 0 else 0
+    else:
+        sharpe = 0
+        sortino = 0
+    
+    # Build metrics dictionary
+    metrics = {
+        'net_profit': net_profit,
+        'net_profit_pct': net_profit_pct,
+        'max_drawdown': max_dd,
+        'win_rate': win_rate_val,
+        'sharpe_ratio': sharpe,
+        'sortino_ratio': sortino,
+        'profit_factor': pf,
+        'avg_r_multiple': avg_r,
+        'expectancy': expectancy,
+        'total_trades': total_trades,
+        'win_count': win_count,
+        'loss_count': loss_count,
+        'avg_win': np.mean(win_amounts) if win_amounts else 0,
+        'avg_loss': np.mean(loss_amounts) if loss_amounts else 0,
+        'equity_curve': equity_curve
+    }
+    
+    return metrics
+
+def plot_equity_curve(equity_curves, output_path=None):
+    """
+    Plot equity curves for one or more symbols.
+    
+    Args:
+        equity_curves: Dictionary mapping symbols to equity curves or single equity curve list
+        output_path: Path to save the plot (optional)
+        
+    Returns:
+        str: Output path if saved, None otherwise
+    """
+    plt.figure(figsize=(12, 6))
+    
+    if isinstance(equity_curves, dict):
+        # Multiple symbols
+        for symbol, curve in equity_curves.items():
+            # Convert to percentage return
+            initial = curve[0]
+            pct_curve = [(value / initial - 1) * 100 for value in curve]
+            plt.plot(pct_curve, label=symbol)
+        
+        plt.legend()
+        plt.title('Equity Curves by Symbol (% Return)')
+    else:
+        # Single equity curve
+        initial = equity_curves[0]
+        pct_curve = [(value / initial - 1) * 100 for value in equity_curves]
+        plt.plot(pct_curve)
+        plt.title('Equity Curve (% Return)')
+    
+    plt.xlabel('Trades')
+    plt.ylabel('Return (%)')
+    plt.grid(True, alpha=0.3)
+    
+    if output_path:
+        plt.savefig(output_path)
+        plt.close()
+        return output_path
+    else:
+        plt.show()
+        return None
+
+def plot_drawdown_curve(equity_curve, output_path=None):
+    """
+    Plot drawdown curve from equity curve.
+    
+    Args:
+        equity_curve: List of equity values over time
+        output_path: Path to save the plot (optional)
+        
+    Returns:
+        str: Output path if saved, None otherwise
+    """
+    plt.figure(figsize=(12, 6))
+    
+    # Calculate drawdowns
+    peak = equity_curve[0]
+    drawdowns = []
+    
+    for value in equity_curve:
+        if value > peak:
+            peak = value
+        
+        current_dd = (peak - value) / peak * 100 if peak > 0 else 0
+        drawdowns.append(current_dd)
+    
+    plt.plot(drawdowns, 'r')
+    plt.fill_between(range(len(drawdowns)), drawdowns, alpha=0.3, color='r')
+    plt.title('Drawdown (%)')
+    plt.xlabel('Trades')
+    plt.ylabel('Drawdown (%)')
+    plt.grid(True, alpha=0.3)
+    
+    if output_path:
+        plt.savefig(output_path)
+        plt.close()
+        return output_path
+    else:
+        plt.show()
+        return None 

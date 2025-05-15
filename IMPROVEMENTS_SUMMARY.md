@@ -40,12 +40,22 @@
    - Fixed automatic port selection for Streamlit dashboard
    - Resolves conflicts when multiple dashboard instances run
 
+9. **Volatility-Targeted Position Sizing**
+   - Implemented position sizing based on volatility instead of fixed risk
+   - Sizes positions to target constant dollar volatility exposure
+   - Formula: `position_size = target_vol_usd / (price * realized_vol)`
+   - Automatically adjusts position sizes based on market conditions
+   - Smaller positions in high-volatility markets, larger in calm markets
+   - Provides more consistent risk exposure across different market regimes
+   - Added `--target-vol-usd` parameter to control target volatility
+
 ## Performance & Testing
 
 - **Backtesting Performance**:
   - BTC/USDT 365-day test: Profit factor 1.55, Return -1.29%
   - Multi-asset test (BTC, ETH, SOL, BNB): Portfolio profit factor 2.66, Return -2.34%
   - Only BNB/USDT produced positive returns (1.40%)
+  - Volatility-targeted sizing (30-day test): Average return per trade increased to +0.058%
 
 - **Recommendations**:
   - Volatility-based position sizing: Consider increasing risk for more positive returns
@@ -68,6 +78,21 @@
    - Explore adaptive parameter adjustment based on market conditions
    - Implement machine learning for entry/exit optimization
 
+4. **Multi-Indicator Filters**
+   - Layer in trend or momentum filters to reduce noise trades
+   - Combine ADX, MACD, and other indicators to confirm entries
+   - Could boost win-rate by avoiding sideways chop
+
+5. **Dynamic Take-Profit Levels**
+   - Implement ATR-based profit targets
+   - Vary take-profit levels based on volatility regimes
+   - Lock in profits in volatile markets more aggressively
+
+6. **Walk-Forward Optimization**
+   - Implement rolling train/test windows
+   - Only carry forward parameter sets that work across multiple periods
+   - Reduce overfitting and find more robust parameters
+
 ## Usage Notes
 
 - **Parameter Optimization**:
@@ -78,3 +103,9 @@
 - **Dashboard**:
   - The dashboard now automatically selects an available port
   - Monitor system performance from the enhanced visualization dashboard 
+
+- **Volatility Targeting**:
+  - Use `--target-vol-usd` parameter to control volatility exposure
+  - Default value is $200 daily volatility
+  - Adjust based on account size (1-2% of account recommended)
+  - Higher values increase position sizes and potential returns/drawdowns 

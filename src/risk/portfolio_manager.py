@@ -15,16 +15,19 @@ from src.utils.logger import logger
 from src.data.fetcher import fetch_ohlcv
 from src.risk.vol_regime_switch import VolatilityRegimeMonitor
 
-# Edge-weighted position sizing configuration
-# Strategies with profit factor >= pf_hi will use risk_hi, others use risk_lo
-EDGE_WEIGHTS = {
-    "ema_crossover": {"pf_hi": 1.2, "risk_hi": 0.010, "risk_lo": 0.005},
-    "rsi_oscillator": {"pf_hi": 1.2, "risk_hi": 0.012, "risk_lo": 0.007},
-}
+# Constants
+VOL_CALM = 0.03  # 3% daily volatility threshold for calm market
+VOL_STORM = 0.06  # 6% daily volatility threshold for stormy market
 
-# Volatility regime thresholds
-VOL_CALM = 0.03  # 3% realized volatility threshold for calm markets
-VOL_STORM = 0.06  # 6% realized volatility threshold for volatile markets
+# Volatility targeting constants
+DEFAULT_TARGET_VOL_USD = 200  # Default target for daily volatility in USD
+
+# Edge-based risk weighting configuration
+EDGE_WEIGHTS = {
+    "ema_crossover": {"pf_hi": 1.5, "risk_hi": 0.015, "risk_lo": 0.005},
+    "rsi_oscillator": {"pf_hi": 1.3, "risk_hi": 0.012, "risk_lo": 0.004},
+    "generic": {"pf_hi": 1.2, "risk_hi": 0.010, "risk_lo": 0.005}
+}
 
 class PortfolioRiskManager:
     """
@@ -33,13 +36,14 @@ class PortfolioRiskManager:
     Features:
     - Volatility-targeted position sizing
     - Global risk cap across all positions
-    - Adaptive sizing based on market regime
-    - Edge-weighted position sizing based on recent performance
+    - Adaptive sizing based on market regimes
+    - Dynamic risk allocation based on strategy edge
+    - Position correlation management
     """
-    
     def __init__(self, account_equity=10000.0, risk_per_trade=0.01, 
                  max_pos_pct=0.2, max_portfolio_risk=0.05, max_correlated_risk=0.08,
-                 use_volatility_sizing=True, cache_dir="data"):
+                 use_volatility_sizing=True, target_vol_usd=DEFAULT_TARGET_VOL_USD, 
+                 cache_dir="data"):
         """
         Initialize the portfolio risk manager.
         
@@ -50,6 +54,7 @@ class PortfolioRiskManager:
             max_portfolio_risk: Maximum total portfolio risk (% of equity)
             max_correlated_risk: Maximum risk for correlated assets (% of equity)
             use_volatility_sizing: Whether to size positions based on volatility
+            target_vol_usd: Target daily volatility exposure in USD for vol-based sizing
             cache_dir: Directory to cache market data
         """
         self.account_equity = account_equity
@@ -59,6 +64,7 @@ class PortfolioRiskManager:
         self.max_portfolio_risk = max_portfolio_risk
         self.max_correlated_risk = max_correlated_risk
         self.use_volatility_sizing = use_volatility_sizing
+        self.target_vol_usd = target_vol_usd
         self.active_positions = {}
         self.cache_dir = cache_dir
         self.vol_cache = {}  # Cache for realized volatility calculations
@@ -70,7 +76,8 @@ class PortfolioRiskManager:
         logger.info(f"Portfolio risk manager initialized with equity ${account_equity}, "
                    f"max risk {max_portfolio_risk*100:.2f}%, "
                    f"trade risk {risk_per_trade*100:.2f}%, "
-                   f"max position {max_pos_pct*100:.2f}%")
+                   f"max position {max_pos_pct*100:.2f}%, "
+                   f"vol target ${target_vol_usd:.2f}")
     
     def _ensure_cache_dir(self):
         """Ensure the cache directory exists"""
@@ -266,21 +273,54 @@ class PortfolioRiskManager:
         Returns:
             float: Position size in base currency units
         """
-        # Step 1: Calculate base risk percentage based on strategy edge and current regime
-        risk_pct = self.current_risk_pct(symbol)
+        if self.use_volatility_sizing:
+            # Volatility targeting approach - size based on constant USD volatility
+            # Convert ATR to percentage of price
+            atr_pct = atr_value / current_price
+            
+            # Calculate realized volatility (annualized)
+            realized_vol = self.calculate_realized_volatility(symbol, lookback=30, timeframe="1d")
+            
+            # If realized volatility is too low, use a minimum value to avoid excessive sizing
+            min_vol = 0.01  # 1% minimum volatility
+            realized_vol = max(realized_vol, min_vol)
+            
+            # Calculate position size targeting constant dollar volatility
+            # Formula: target_vol_usd / (price * daily_vol)
+            qty = self.target_vol_usd / (current_price * realized_vol)
+            
+            # Calculate dollar risk for logging 
+            dollar_risk = qty * current_price * realized_vol
+            
+            # Log volatility-targeted sizing
+            regime = self.current_regime(symbol)
+            logger.info(f"Vol-targeting: {symbol} ({regime}) - ${self.target_vol_usd:.2f} target, " 
+                        f"{realized_vol:.2%} vol, ${dollar_risk:.2f} risk")
+            
+        else:
+            # Traditional risk-based approach as fallback
+            # Step 1: Calculate base risk percentage based on strategy edge and current regime
+            risk_pct = self.current_risk_pct(symbol)
+            
+            # If we have profit factor data, further adjust based on edge
+            if pf_recent > 0:
+                cfg = EDGE_WEIGHTS.get(strat_name, None)
+                if cfg is not None and pf_recent >= cfg["pf_hi"]:
+                    # Boost risk for strategies with proven edge
+                    risk_pct = max(risk_pct, cfg["risk_hi"])
+            
+            # Step 2: Calculate dollar risk amount
+            dollar_risk = self.account_equity * risk_pct
+            
+            # Step 3: Calculate position size based on ATR value
+            qty = dollar_risk / atr_value
+            
+            # Log the traditional sizing
+            regime = self.current_regime(symbol)
+            logger.info(f"Risk-based sizing: {symbol} ({regime}) - ${dollar_risk:.2f} risk, {risk_pct:.2%} of equity")
         
-        # If we have profit factor data, further adjust based on edge
-        if pf_recent > 0:
-            cfg = EDGE_WEIGHTS.get(strat_name, None)
-            if cfg is not None and pf_recent >= cfg["pf_hi"]:
-                # Boost risk for strategies with proven edge
-                risk_pct = max(risk_pct, cfg["risk_hi"])
-        
-        # Step 2: Calculate dollar risk amount
-        dollar_risk = self.account_equity * risk_pct
-        
-        # Step 3: Calculate position size based on ATR value
-        qty = round(dollar_risk / atr_value, 3)
+        # Round to 3 decimal places for better precision
+        qty = round(qty, 3)
         
         # Step 4: Adjust position size based on market regime
         qty = self.adjust_size_for_regime(qty, symbol)
@@ -289,9 +329,7 @@ class PortfolioRiskManager:
         max_qty = self.account_equity * self.max_pos_pct / current_price
         qty = min(qty, max_qty)
         
-        # Log the details
-        regime = self.current_regime(symbol)
-        logger.info(f"Position sizing: {symbol} ({regime} regime) - ${dollar_risk:.2f} risk, {risk_pct:.2%} of equity")
+        # Log the final position
         logger.info(f"Final position: {qty:.6f} units ({qty * current_price:.2f} USD)")
         
         return qty

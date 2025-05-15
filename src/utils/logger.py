@@ -81,6 +81,25 @@ slack_client = None
 if SLACK_BOT_TOKEN:
     slack_client = WebClient(token=SLACK_BOT_TOKEN)
 
+def setup_logger(debug=False):
+    """
+    Set up the logger with optional debug mode.
+    
+    Args:
+        debug: Whether to enable debug logging
+    """
+    if debug:
+        logger.setLevel(logging.DEBUG)
+        for handler in logger.handlers:
+            handler.setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
+    else:
+        logger.setLevel(getattr(logging, LOG_LEVEL))
+        for handler in logger.handlers:
+            handler.setLevel(getattr(logging, LOG_LEVEL))
+    
+    return logger
+
 def log_trade(trade_data):
     """Log trade information to file and send notification to Slack."""
     # Log to file

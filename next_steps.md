@@ -20,8 +20,56 @@ The volatility regime switch has been successfully implemented. This feature:
 
 You can test the volatility regime monitor by running:
 ```
-python check_volatility_regimes.py --symbols "BTC/USDT,ETH/USDT,SOL/USDT,BNB/USDT" --plot
+python check_volatility_regimes.py --symbols "BTC/USDT,ETH/USDT" --plot
 ```
+
+## ✅ Implemented: Volatility-Targeted Position Sizing
+
+The volatility-targeted position sizing has been successfully implemented. This feature:
+
+- Sizes positions based on target dollar volatility exposure instead of fixed risk percentage
+- Formula: `position_size = target_vol_usd / (price * realized_vol)`
+- Automatically adjusts position sizes based on current market volatility
+- Provides more consistent risk exposure across different market regimes
+- Added `--target-vol-usd` parameter to control target volatility (default: $200)
+
+You can test this feature by running:
+```
+python run_adaptive_strategy.py --mode backtest --symbols "BTC/USDT,ETH/USDT" --days 30 --target-vol-usd 200
+```
+
+## Next Enhancement: Multi-Indicator Filters
+
+The next enhancement to implement is multi-indicator filters to reduce noise trades and improve win rate:
+
+- Layer in a trend or momentum filter to reduce noise trades
+- Combine ADX, MACD, and other indicators to confirm entries
+- Only take trades aligning with higher-timeframe trend
+- Implement a filter in the strategy's on_bar() method like:
+  ```python
+  # in your strategy's on_bar():
+  if adx > 20 and macd.histogram > 0 and ema_fast > ema_slow:
+      # only then allow a long entry
+  ```
+
+This should significantly improve win-rate by avoiding sideways chop and low-quality setups.
+
+## Future Enhancements
+
+1. **Walk-Forward Optimization**
+   - Train on rolling windows and test on out-of-sample periods
+   - Compare parameter sets across multiple time windows
+   - Find robust parameters that work across different market conditions
+
+2. **Dynamic Take-Profit Levels**
+   - Implement ATR-based profit targets
+   - Vary take-profit levels based on volatility regimes
+   - Lock in profits in volatile markets more aggressively
+
+3. **Fee & Slippage Modeling**
+   - Implement realistic commission + funding costs in PnL
+   - Optimize net R-multiples after fees
+   - Ensure strategies remain profitable after all costs
 
 ## Testing the Optimized Parameters
 
