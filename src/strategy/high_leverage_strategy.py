@@ -16,6 +16,18 @@ This strategy now uses the "Fast & Loose" configuration by default, which includ
 
 These settings produce significantly more trade signals than the original configuration.
 For a more conservative approach, parameters can be explicitly provided when initializing.
+
+EXIT STRATEGY:
+This strategy implements a comprehensive exit system with:
+- Multi-Tier Take-Profit: Fixed TP plus trailing stop that tightens at R-multiple milestones
+- Partial Scale-Outs: Take partial profits at predefined R-multiples
+- Maximum Hold Period: Time-based exit to prevent holding positions too long
+
+PATTERN FILTERS:
+Added candlestick pattern detection and volume filters:
+- Engulfing, Hammer, and Doji pattern recognition for entry confirmation
+- Volume spike detection to confirm significant market interest
+- Optional pattern and volume requirements for higher-quality trade signals
 """
 
 import numpy as np
@@ -23,6 +35,7 @@ import pandas as pd
 from src.strategy.enhanced_strategy import EnhancedConfirmationStrategy
 from ta.momentum import RSIIndicator
 from ta.volatility import AverageTrueRange
+from datetime import timedelta
 
 
 class HighLeverageStrategy(EnhancedConfirmationStrategy):
@@ -56,6 +69,28 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         max_position_size = kwargs.pop('max_position_size', 0.05)
         adaptive_vol_scaling = kwargs.pop('adaptive_vol_scaling', True)
         
+        # New exit strategy parameters
+        take_profit_r = kwargs.pop('take_profit_r', 2.0)  # Take profit at 2R
+        use_trailing_stop = kwargs.pop('use_trailing_stop', True)
+        initial_trail_r = kwargs.pop('initial_trail_r', 1.0)  # Initial trailing stop at 1R distance
+        r1_trail_pct = kwargs.pop('r1_trail_pct', 0.75)  # At 1R profit, trail tightens to 75% of initial
+        r2_trail_pct = kwargs.pop('r2_trail_pct', 0.5)   # At 2R profit, trail tightens to 50% of initial
+        r3_trail_pct = kwargs.pop('r3_trail_pct', 0.25)  # At 3R profit, trail tightens to 25% of initial
+        use_partial_exit = kwargs.pop('use_partial_exit', True)
+        partial_exit_r = kwargs.pop('partial_exit_r', 1.0)  # Take partial profit at 1R
+        partial_exit_pct = kwargs.pop('partial_exit_pct', 0.5)  # Exit 50% of position
+        max_hold_periods = kwargs.pop('max_hold_periods', 24)  # Maximum hold time in periods
+        
+        # New pattern and volume filter parameters
+        use_pattern_filter = kwargs.pop('use_pattern_filter', True)
+        pattern_strictness = kwargs.pop('pattern_strictness', 'medium')  # 'loose', 'medium', 'strict'
+        require_engulfing = kwargs.pop('require_engulfing', False)
+        require_doji = kwargs.pop('require_doji', False)
+        require_hammer = kwargs.pop('require_hammer', False)
+        use_volume_filter = kwargs.pop('use_volume_filter', True)
+        volume_threshold = kwargs.pop('volume_threshold', 1.5)  # 150% of average volume
+        volume_lookback = kwargs.pop('volume_lookback', 20)  # Look back 20 periods for avg volume
+        
         # Initialize parent strategy with base parameters
         super().__init__(**kwargs)
         
@@ -81,6 +116,28 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         self.max_position_size = max_position_size
         self.adaptive_vol_scaling = adaptive_vol_scaling
         
+        # Store exit strategy parameters
+        self.take_profit_r = take_profit_r
+        self.use_trailing_stop = use_trailing_stop
+        self.initial_trail_r = initial_trail_r
+        self.r1_trail_pct = r1_trail_pct
+        self.r2_trail_pct = r2_trail_pct
+        self.r3_trail_pct = r3_trail_pct
+        self.use_partial_exit = use_partial_exit
+        self.partial_exit_r = partial_exit_r
+        self.partial_exit_pct = partial_exit_pct
+        self.max_hold_periods = max_hold_periods
+        
+        # Store pattern and volume filter parameters
+        self.use_pattern_filter = use_pattern_filter
+        self.pattern_strictness = pattern_strictness
+        self.require_engulfing = require_engulfing
+        self.require_doji = require_doji
+        self.require_hammer = require_hammer
+        self.use_volume_filter = use_volume_filter
+        self.volume_threshold = volume_threshold
+        self.volume_lookback = volume_lookback
+        
         # Tracking stats
         self.mtf_confirmations = 0
         self.mtf_rejections = 0
@@ -94,7 +151,11 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
             'mtf_rejected': 0,
             'momentum_confirmed': 0,
             'momentum_rejected': 0,
-            'volatility_adjustments': 0
+            'volatility_adjustments': 0,
+            'pattern_confirmed': 0,
+            'pattern_rejected': 0,
+            'volume_confirmed': 0,
+            'volume_rejected': 0
         }
         
         # For storing regime statistics
@@ -176,7 +237,228 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
                     elif signals['vol_regime'].iloc[i] == 'LOW' and signals['vol_regime'].iloc[i-1] != 'LOW':
                         signals.loc[signals.index[i], 'vol_adjustment'] *= 0.9  # More conservative
         
+        # Add candlestick pattern detection
+        if self.use_pattern_filter:
+            self.detect_candlestick_patterns(signals)
+            
+        # Add volume filter
+        if self.use_volume_filter:
+            self.detect_volume_spikes(signals)
+            
         return signals
+    
+    def detect_candlestick_patterns(self, df):
+        """
+        Detect key candlestick patterns.
+        
+        Args:
+            df: DataFrame with OHLCV data
+            
+        Returns:
+            DataFrame with pattern columns added
+        """
+        # Initialize pattern columns
+        df['doji'] = False
+        df['engulfing'] = False
+        df['hammer'] = False
+        df['bullish_pattern'] = False
+        df['bearish_pattern'] = False
+        
+        # Calculate body and shadow sizes
+        df['body_size'] = abs(df['close'] - df['open'])
+        df['upper_shadow'] = df['high'] - df[['open', 'close']].max(axis=1)
+        df['lower_shadow'] = df[['open', 'close']].min(axis=1) - df['low']
+        df['body_to_range_ratio'] = df['body_size'] / (df['high'] - df['low']).replace(0, np.nan)
+        
+        # Detect Doji patterns (small body relative to range)
+        if self.pattern_strictness == 'strict':
+            doji_threshold = 0.1  # Body is less than 10% of range
+        elif self.pattern_strictness == 'medium':
+            doji_threshold = 0.15  # Body is less than 15% of range
+        else:  # loose
+            doji_threshold = 0.2  # Body is less than 20% of range
+            
+        df['doji'] = df['body_to_range_ratio'] <= doji_threshold
+        
+        # Detect Engulfing patterns
+        for i in range(1, len(df)):
+            # Bullish Engulfing
+            df.loc[df.index[i], 'engulfing'] = (
+                # Current candle is bullish (close > open)
+                (df['close'].iloc[i] > df['open'].iloc[i]) and
+                # Previous candle is bearish (close < open)
+                (df['close'].iloc[i-1] < df['open'].iloc[i-1]) and
+                # Current body engulfs previous body
+                (df['close'].iloc[i] > df['open'].iloc[i-1]) and
+                (df['open'].iloc[i] < df['close'].iloc[i-1])
+            ) or (
+                # Bearish Engulfing
+                # Current candle is bearish (close < open)
+                (df['close'].iloc[i] < df['open'].iloc[i]) and
+                # Previous candle is bullish (close > open)
+                (df['close'].iloc[i-1] > df['open'].iloc[i-1]) and
+                # Current body engulfs previous body
+                (df['close'].iloc[i] < df['open'].iloc[i-1]) and
+                (df['open'].iloc[i] > df['close'].iloc[i-1])
+            )
+            
+        # Detect Hammer patterns
+        for i in range(len(df)):
+            # Get candle direction
+            is_bullish = df['close'].iloc[i] > df['open'].iloc[i]
+            
+            # Calculate body and shadow ratios for hammer detection
+            if df['body_size'].iloc[i] > 0:  # Avoid division by zero
+                lower_shadow_ratio = df['lower_shadow'].iloc[i] / df['body_size'].iloc[i]
+                upper_shadow_ratio = df['upper_shadow'].iloc[i] / df['body_size'].iloc[i]
+                
+                # Hammer criteria based on strictness
+                if self.pattern_strictness == 'strict':
+                    min_shadow_ratio = 2.0  # Lower shadow at least 2x body
+                    max_upper_ratio = 0.2   # Upper shadow at most 0.2x body
+                elif self.pattern_strictness == 'medium':
+                    min_shadow_ratio = 1.5  # Lower shadow at least 1.5x body
+                    max_upper_ratio = 0.3   # Upper shadow at most 0.3x body
+                else:  # loose
+                    min_shadow_ratio = 1.0  # Lower shadow at least as big as body
+                    max_upper_ratio = 0.5   # Upper shadow at most half the body
+                
+                # Bullish Hammer (in downtrend)
+                df.loc[df.index[i], 'hammer'] = (
+                    lower_shadow_ratio >= min_shadow_ratio and
+                    upper_shadow_ratio <= max_upper_ratio
+                )
+        
+        # Combine patterns into bullish/bearish signals
+        for i in range(1, len(df)):
+            # Bullish patterns
+            df.loc[df.index[i], 'bullish_pattern'] = (
+                # Bullish Engulfing
+                (df['engulfing'].iloc[i] and df['close'].iloc[i] > df['open'].iloc[i]) or
+                # Hammer in downtrend (check for downtrend using past n candles)
+                (df['hammer'].iloc[i] and df['close'].iloc[i-1] < df['close'].iloc[max(0, i-5):i].mean()) or
+                # Doji after down move
+                (df['doji'].iloc[i] and df['close'].iloc[i-1] < df['open'].iloc[i-1])
+            )
+            
+            # Bearish patterns
+            df.loc[df.index[i], 'bearish_pattern'] = (
+                # Bearish Engulfing
+                (df['engulfing'].iloc[i] and df['close'].iloc[i] < df['open'].iloc[i]) or
+                # Inverted Hammer in uptrend
+                (df['hammer'].iloc[i] and df['upper_shadow'].iloc[i] > df['lower_shadow'].iloc[i] and 
+                 df['close'].iloc[i-1] > df['close'].iloc[max(0, i-5):i].mean()) or
+                # Doji after up move
+                (df['doji'].iloc[i] and df['close'].iloc[i-1] > df['open'].iloc[i-1])
+            )
+        
+        return df
+    
+    def detect_volume_spikes(self, df):
+        """
+        Detect volume spikes for trade confirmation.
+        
+        Args:
+            df: DataFrame with OHLCV data
+            
+        Returns:
+            DataFrame with volume spike indicator added
+        """
+        if 'volume' not in df.columns:
+            # Add dummy volume indicator if volume not available
+            df['volume_spike'] = True
+            return df
+            
+        # Calculate average volume over lookback period
+        df['avg_volume'] = df['volume'].rolling(window=self.volume_lookback).mean()
+        
+        # Detect volume spikes
+        df['volume_spike'] = df['volume'] >= (df['avg_volume'] * self.volume_threshold)
+        
+        # For first few candles without enough lookback, assume no spike
+        df['volume_spike'].fillna(False, inplace=True)
+        
+        return df
+    
+    def check_pattern_filter(self, df, idx):
+        """
+        Check if candlestick pattern filter passes.
+        
+        Args:
+            df: DataFrame with signal data
+            idx: Current index
+            
+        Returns:
+            Boolean indicating if filter passes
+        """
+        if not self.use_pattern_filter or idx < 1:
+            return True
+            
+        # Get current signal
+        current_signal = df['signal'].iloc[idx]
+        if current_signal == 0:
+            return True  # No signal to confirm
+            
+        # Check for bullish or bearish patterns based on signal direction
+        if current_signal > 0:  # Long signal
+            # Check for any bullish pattern
+            pattern_matched = df['bullish_pattern'].iloc[idx]
+            
+            # Apply additional requirements based on settings
+            if self.require_engulfing and not df['engulfing'].iloc[idx]:
+                pattern_matched = False
+            if self.require_doji and not df['doji'].iloc[idx]:
+                pattern_matched = False
+            if self.require_hammer and not df['hammer'].iloc[idx]:
+                pattern_matched = False
+                
+        else:  # Short signal
+            # Check for any bearish pattern
+            pattern_matched = df['bearish_pattern'].iloc[idx]
+            
+            # Apply additional requirements
+            if self.require_engulfing and not df['engulfing'].iloc[idx]:
+                pattern_matched = False
+            if self.require_doji and not df['doji'].iloc[idx]:
+                pattern_matched = False
+                
+        # Update stats
+        if pattern_matched:
+            self.confirmation_stats['pattern_confirmed'] += 1
+        else:
+            self.confirmation_stats['pattern_rejected'] += 1
+            
+        return pattern_matched
+    
+    def check_volume_filter(self, df, idx):
+        """
+        Check if volume filter passes.
+        
+        Args:
+            df: DataFrame with signal data
+            idx: Current index
+            
+        Returns:
+            Boolean indicating if filter passes
+        """
+        if not self.use_volume_filter or 'volume_spike' not in df.columns:
+            return True
+            
+        # Get current signal
+        current_signal = df['signal'].iloc[idx]
+        if current_signal == 0:
+            return True  # No signal to confirm
+            
+        # Check for volume spike
+        volume_confirmed = df['volume_spike'].iloc[idx]
+        
+        # Update stats
+        if volume_confirmed:
+            self.confirmation_stats['volume_confirmed'] += 1
+        else:
+            self.confirmation_stats['volume_rejected'] += 1
+            
+        return volume_confirmed
     
     def check_multi_timeframe_alignment(self, df, idx, mtf_data):
         """
@@ -362,6 +644,10 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         mtf_aligned = self.check_multi_timeframe_alignment(df, idx, mtf_data)
         momentum_aligned = self.check_momentum_filter(df, idx)
         
+        # Check pattern and volume filters
+        pattern_confirmed = self.check_pattern_filter(df, idx)
+        volume_confirmed = self.check_volume_filter(df, idx)
+        
         # Volatility filter is now disabled by default
         # Only perform an extreme volatility check in rare cases
         valid_volatility = True
@@ -371,7 +657,11 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
             valid_volatility = not extreme_volatility
         
         # Combined decision - required filters must pass
-        return mtf_aligned and momentum_aligned and valid_volatility
+        return (mtf_aligned and 
+                momentum_aligned and 
+                pattern_confirmed and 
+                volume_confirmed and 
+                valid_volatility)
     
     def calculate_stop_loss(self, df, idx, entry_price, side):
         """
@@ -412,4 +702,249 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         else:  # short
             stop_loss = entry_price + stop_distance
         
-        return stop_loss 
+        return stop_loss
+
+    def calculate_take_profit(self, df, idx, entry_price, stop_loss, side):
+        """
+        Calculate take profit levels based on R-multiples.
+        
+        Args:
+            df: DataFrame with signal data
+            idx: Current index
+            entry_price: Entry price
+            stop_loss: Stop loss price
+            side: Trade direction ('long' or 'short')
+            
+        Returns:
+            Dictionary containing take profit levels
+        """
+        # Calculate R value (risk per share)
+        if side == 'long':
+            r_value = entry_price - stop_loss
+        else:  # short
+            r_value = stop_loss - entry_price
+            
+        # Safety check
+        if r_value <= 0:
+            r_value = entry_price * 0.01  # Default to 1% if calculation fails
+            
+        # Calculate take profit levels based on R-multiples
+        take_profits = {}
+        
+        # Main take profit
+        if side == 'long':
+            take_profits['main'] = entry_price + (r_value * self.take_profit_r)
+        else:  # short
+            take_profits['main'] = entry_price - (r_value * self.take_profit_r)
+            
+        # Partial exit level
+        if self.use_partial_exit:
+            if side == 'long':
+                take_profits['partial'] = entry_price + (r_value * self.partial_exit_r)
+            else:  # short
+                take_profits['partial'] = entry_price - (r_value * self.partial_exit_r)
+        
+        return take_profits
+    
+    def calculate_trailing_stop(self, df, idx, entry_price, stop_loss, current_price, side, r_value=None):
+        """
+        Calculate adaptive trailing stop based on profit achieved.
+        
+        Args:
+            df: DataFrame with signal data
+            idx: Current index
+            entry_price: Entry price
+            stop_loss: Initial stop loss price
+            current_price: Current market price
+            side: Trade direction ('long' or 'short')
+            r_value: Risk per share (optional)
+            
+        Returns:
+            Updated stop loss price
+        """
+        if not self.use_trailing_stop:
+            return stop_loss
+            
+        # Calculate R value if not provided
+        if r_value is None:
+            if side == 'long':
+                r_value = entry_price - stop_loss
+            else:  # short
+                r_value = stop_loss - entry_price
+                
+        # Safety check
+        if r_value <= 0:
+            r_value = entry_price * 0.01  # Default to 1% if calculation fails
+            
+        # Calculate current profit in R multiples
+        if side == 'long':
+            current_profit_r = (current_price - entry_price) / r_value
+        else:  # short
+            current_profit_r = (entry_price - current_price) / r_value
+            
+        # Determine trailing stop distance based on profit achieved
+        trail_percentage = 1.0  # Default trail distance (100% of initial trail)
+        
+        if current_profit_r >= 3.0:
+            trail_percentage = self.r3_trail_pct
+        elif current_profit_r >= 2.0:
+            trail_percentage = self.r2_trail_pct
+        elif current_profit_r >= 1.0:
+            trail_percentage = self.r1_trail_pct
+            
+        # Calculate trailing stop distance
+        trail_distance = self.initial_trail_r * r_value * trail_percentage
+        
+        # Calculate new stop price
+        if side == 'long':
+            new_stop = current_price - trail_distance
+            # Only move stop up, never down
+            return max(new_stop, stop_loss)
+        else:  # short
+            new_stop = current_price + trail_distance
+            # Only move stop down, never up
+            return min(new_stop, stop_loss)
+            
+    def check_max_hold_time(self, entry_time, current_time, timeframe=None):
+        """
+        Check if the maximum hold time has been exceeded.
+        
+        Args:
+            entry_time: Entry timestamp
+            current_time: Current timestamp
+            timeframe: Timeframe string (optional)
+            
+        Returns:
+            Boolean indicating if max hold time is exceeded
+        """
+        # If times aren't datetime objects, assume periods and count them
+        if not isinstance(entry_time, pd.Timestamp) or not isinstance(current_time, pd.Timestamp):
+            periods_held = current_time - entry_time
+            return periods_held >= self.max_hold_periods
+            
+        # If timeframe is provided, convert to timedelta
+        if timeframe:
+            if timeframe.endswith('m'):
+                minutes = int(timeframe[:-1])
+                max_delta = timedelta(minutes=minutes * self.max_hold_periods)
+            elif timeframe.endswith('h'):
+                hours = int(timeframe[:-1])
+                max_delta = timedelta(hours=hours * self.max_hold_periods)
+            elif timeframe.endswith('d'):
+                days = int(timeframe[:-1])
+                max_delta = timedelta(days=days * self.max_hold_periods)
+            else:
+                # Default to 24 hours if timeframe is unknown
+                max_delta = timedelta(hours=24)
+        else:
+            # Default to 24 hours if timeframe is not provided
+            max_delta = timedelta(hours=24)
+            
+        # Check if the time difference exceeds the maximum hold time
+        return (current_time - entry_time) >= max_delta
+    
+    def manage_trade_exits(self, df, position, idx, timeframe=None):
+        """
+        Comprehensive exit management system.
+        
+        Args:
+            df: DataFrame with signal data
+            position: Current position information dictionary
+            idx: Current index
+            timeframe: Timeframe string (optional)
+            
+        Returns:
+            Dictionary with exit decision and updated position
+        """
+        # Extract position details
+        entry_price = position.get('entry_price', 0)
+        stop_loss = position.get('stop_loss', 0)
+        take_profits = position.get('take_profits', {})
+        side = position.get('side', 'long')
+        entry_time = position.get('entry_time', 0)
+        position_size = position.get('size', 0)
+        remaining_size = position.get('remaining_size', position_size)
+        
+        # Current market conditions
+        current_price = df['close'].iloc[idx]
+        current_time = df.index[idx] if isinstance(df.index, pd.DatetimeIndex) else idx
+        
+        # Initialize exit decision
+        exit = {
+            'exit_triggered': False,
+            'exit_price': 0,
+            'exit_reason': '',
+            'exit_size': 0,
+            'remaining_size': remaining_size
+        }
+        
+        # Calculate R value
+        if side == 'long':
+            r_value = entry_price - stop_loss
+        else:  # short
+            r_value = stop_loss - entry_price
+            
+        # Update trailing stop
+        updated_stop = self.calculate_trailing_stop(
+            df, idx, entry_price, stop_loss, current_price, side, r_value
+        )
+        
+        # Check stop loss hit
+        stop_triggered = False
+        if side == 'long' and current_price <= updated_stop:
+            stop_triggered = True
+        elif side == 'short' and current_price >= updated_stop:
+            stop_triggered = True
+            
+        if stop_triggered:
+            exit['exit_triggered'] = True
+            exit['exit_price'] = updated_stop
+            exit['exit_reason'] = 'Stop Loss'
+            exit['exit_size'] = remaining_size
+            exit['remaining_size'] = 0
+            return exit
+            
+        # Check take profit hit
+        if 'main' in take_profits:
+            tp_triggered = False
+            if side == 'long' and current_price >= take_profits['main']:
+                tp_triggered = True
+            elif side == 'short' and current_price <= take_profits['main']:
+                tp_triggered = True
+                
+            if tp_triggered:
+                exit['exit_triggered'] = True
+                exit['exit_price'] = take_profits['main']
+                exit['exit_reason'] = 'Take Profit'
+                exit['exit_size'] = remaining_size
+                exit['remaining_size'] = 0
+                return exit
+                
+        # Check partial exit
+        if self.use_partial_exit and 'partial' in take_profits and remaining_size == position_size:
+            partial_triggered = False
+            if side == 'long' and current_price >= take_profits['partial']:
+                partial_triggered = True
+            elif side == 'short' and current_price <= take_profits['partial']:
+                partial_triggered = True
+                
+            if partial_triggered:
+                exit_size = position_size * self.partial_exit_pct
+                exit['exit_triggered'] = True
+                exit['exit_price'] = take_profits['partial']
+                exit['exit_reason'] = 'Partial Take Profit'
+                exit['exit_size'] = exit_size
+                exit['remaining_size'] = remaining_size - exit_size
+                return exit
+                
+        # Check time-based exit
+        if self.check_max_hold_time(entry_time, current_time, timeframe):
+            exit['exit_triggered'] = True
+            exit['exit_price'] = current_price
+            exit['exit_reason'] = 'Time Stop'
+            exit['exit_size'] = remaining_size
+            exit['remaining_size'] = 0
+            return exit
+            
+        # No exit triggered
+        return exit 
