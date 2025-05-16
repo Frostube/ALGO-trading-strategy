@@ -1,0 +1,4 @@
+total_return,profit_factor,win_rate,max_drawdown,n_trades,roi,sharpe_ratio,total_trades,window_id,train_start,train_end,test_start,test_end,train_samples,test_samples,train_roi,train_sharpe,num_trades
+0.0158249318017325,2.596479773898036,0.5333333333333333,-0.0058791788306991055,15,0.0,0.0,0,1,2025-02-14,2025-04-15,2025-04-16,2025-05-16,361,181,0,0,0
+0.034237570460394995,inf,1.0,0.0,6,0.0,0.0,0,2,2024-11-14,2025-01-13,2025-01-14,2025-02-13,361,181,0,0,0
+0.0,0.0,0.0,0.0,0,0.0,0.0,0,3,2024-08-14,2024-10-13,2024-10-14,2024-11-13,361,181,0,0,0

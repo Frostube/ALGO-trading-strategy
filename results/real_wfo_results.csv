@@ -1,0 +1,4 @@
+window_id,train_start,train_end,test_start,test_end,train_samples,test_samples,train_roi,train_trades,train_win_rate,train_sharpe,train_drawdown,test_roi,test_trades,test_win_rate,test_sharpe,test_drawdown,test_profit_factor
+1,2025-02-14,2025-04-15,2025-04-16,2025-05-16,361,181,0.0,0,0.0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+2,2024-11-14,2025-01-13,2025-01-14,2025-02-13,361,181,0.0,0,0.0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0
+3,2024-08-14,2024-10-13,2024-10-14,2024-11-13,361,181,0.0,0,0.0,0.0,0.0,0.0,0,0.0,0.0,0.0,0.0

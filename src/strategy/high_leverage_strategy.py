@@ -163,10 +163,18 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
             'momentum_confirmed': 0,
             'momentum_rejected': 0,
             'volatility_adjustments': 0,
+            'volatility_confirmed': 0,
+            'volatility_rejected': 0,
             'pattern_confirmed': 0,
             'pattern_rejected': 0,
             'volume_confirmed': 0,
-            'volume_rejected': 0
+            'volume_rejected': 0,
+            'pivot_confirmed': 0,
+            'pivot_rejected': 0,
+            'total_signals': 0,
+            'signals_passed': 0,
+            'signals_rejected': 0,
+            'weighted_scores': []
         }
         
         # For storing regime statistics
