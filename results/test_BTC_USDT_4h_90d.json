@@ -1,0 +1,213 @@
+{
+    "symbol": "BTC/USDT",
+    "timeframe": "4h",
+    "lookback_days": 90,
+    "initial_balance": 10000,
+    "final_balance": 10000,
+    "pnl": 0,
+    "roi": 0.0,
+    "total_trades": 0,
+    "winning_trades": 0,
+    "losing_trades": 0,
+    "market_conditions": {},
+    "trades": [],
+    "detected_segments": [
+        {
+            "start_date": "2025-02-15 16:00",
+            "end_date": "2025-02-19 00:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-02-19 00:00",
+            "end_date": "2025-02-21 12:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-02-21 12:00",
+            "end_date": "2025-02-23 04:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-02-23 04:00",
+            "end_date": "2025-02-24 20:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-02-24 20:00",
+            "end_date": "2025-02-27 08:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-02-27 08:00",
+            "end_date": "2025-03-01 00:00",
+            "condition": "Unknown"
+        },
+        {
+            "start_date": "2025-03-01 00:00",
+            "end_date": "2025-03-02 16:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-03-02 16:00",
+            "end_date": "2025-03-04 08:00",
+            "condition": "Strong Bear"
+        },
+        {
+            "start_date": "2025-03-04 08:00",
+            "end_date": "2025-03-06 00:00",
+            "condition": "Normal Bull"
+        },
+        {
+            "start_date": "2025-03-06 00:00",
+            "end_date": "2025-03-09 08:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-03-09 08:00",
+            "end_date": "2025-03-11 00:00",
+            "condition": "Normal Bear"
+        },
+        {
+            "start_date": "2025-03-11 00:00",
+            "end_date": "2025-03-13 12:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-03-13 12:00",
+            "end_date": "2025-03-16 00:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-03-16 00:00",
+            "end_date": "2025-03-17 16:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-03-17 16:00",
+            "end_date": "2025-03-19 08:00",
+            "condition": "Sideways"
+        },
+        {
+            "start_date": "2025-03-19 08:00",
+            "end_date": "2025-03-21 20:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-03-21 20:00",
+            "end_date": "2025-03-25 04:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-03-25 04:00",
+            "end_date": "2025-03-31 00:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-03-31 00:00",
+            "end_date": "2025-04-02 12:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-02 12:00",
+            "end_date": "2025-04-04 04:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-04-04 04:00",
+            "end_date": "2025-04-06 16:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-04-06 16:00",
+            "end_date": "2025-04-08 08:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-08 08:00",
+            "end_date": "2025-04-10 00:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-10 00:00",
+            "end_date": "2025-04-13 08:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-13 08:00",
+            "end_date": "2025-04-15 00:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-15 00:00",
+            "end_date": "2025-04-16 16:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-04-16 16:00",
+            "end_date": "2025-04-18 08:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-18 08:00",
+            "end_date": "2025-04-20 00:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-20 00:00",
+            "end_date": "2025-04-22 12:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-22 12:00",
+            "end_date": "2025-04-25 20:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-25 20:00",
+            "end_date": "2025-04-27 12:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-04-27 12:00",
+            "end_date": "2025-04-29 04:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-04-29 04:00",
+            "end_date": "2025-04-30 20:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-04-30 20:00",
+            "end_date": "2025-05-02 12:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-05-02 12:00",
+            "end_date": "2025-05-05 20:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-05-05 20:00",
+            "end_date": "2025-05-08 08:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-05-08 08:00",
+            "end_date": "2025-05-11 16:00",
+            "condition": "Weak Bull"
+        },
+        {
+            "start_date": "2025-05-11 16:00",
+            "end_date": "2025-05-13 08:00",
+            "condition": "Weak Bear"
+        },
+        {
+            "start_date": "2025-05-13 08:00",
+            "end_date": "2025-05-15 20:00",
+            "condition": "Weak Bear"
+        }
+    ],
+    "win_rate": 0,
+    "max_drawdown": 0.0
+}

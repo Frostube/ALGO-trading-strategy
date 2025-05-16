@@ -1,0 +1,22 @@
+{
+  "symbol": "BTC/USDT",
+  "timeframe": "1h",
+  "total_bars": 2160,
+  "raw_signals": 0,
+  "filtered_signals": 0,
+  "signals": [],
+  "filters": {
+    "mtf": {
+      "pass": 0,
+      "fail": 0
+    },
+    "momentum": {
+      "pass": 0,
+      "fail": 0
+    },
+    "volatility": {
+      "pass": 0,
+      "fail": 0
+    }
+  }
+}
