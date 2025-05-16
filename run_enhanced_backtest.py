@@ -351,8 +351,14 @@ class EnhancedBacktester(Backtester):
                     position_size = risk_amount / stop_distance if stop_distance > 0 else 0
                     
                     # Cap position size to avoid unrealistic values
-                    max_position_value = cash * 0.5  # Max 50% of balance per trade
+                    max_position_value = cash * 0.2  # Max 20% of balance per trade (down from 50%)
                     position_size = min(position_size, max_position_value / current_price)
+                    
+                    # Additional cap to prevent exponential growth
+                    if cash > self.initial_balance * 10:  # If balance grew more than 10x
+                        # Scale down position size logarithmically
+                        growth_factor = np.log10(cash / self.initial_balance) / 10
+                        position_size *= (1 - min(growth_factor, 0.9))  # Cap at 90% reduction
                 
                 # Apply signal direction
                 position_qty = position_size if signal > 0 else -position_size
