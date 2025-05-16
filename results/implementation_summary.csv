@@ -1,0 +1,4 @@
+,avg_roi,median_roi,min_roi,max_roi,avg_trades,median_trades,min_trades,max_trades,avg_win_rate,median_win_rate,min_win_rate,max_win_rate,avg_sharpe,median_sharpe,min_sharpe,max_sharpe,avg_profit_factor,median_profit_factor,min_profit_factor,max_profit_factor,avg_max_drawdown,median_max_drawdown,min_max_drawdown,max_max_drawdown,profitable_windows_pct,windows
+fastloose,0.0,0.0,0.0,0.0,0.0,0.0,0,0,0.5111111111111111,0.5333333333333333,0.0,1.0,0.0,0.0,0.0,0.0,1.298239886949018,1.298239886949018,0.0,2.596479773898036,-0.0019597262768997,0.0,-0.0058791788306991,0.0,0.0,3
+simple_ema,1.2778886944126466,2.587400690227115,-2.35311972867478,3.599385121685605,1.3333333333333333,1.0,1,2,50.0,50.0,0.0,100.0,,,,,0.970471102229369,0.970471102229369,0.0,1.940942204458738,,,,,66.66666666666666,3
+real_wfo,0.0,0.0,0.0,0.0,0.0,0.0,0,0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,3
