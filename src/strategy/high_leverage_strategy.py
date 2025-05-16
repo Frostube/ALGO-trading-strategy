@@ -20,14 +20,23 @@ For a more conservative approach, parameters can be explicitly provided when ini
 EXIT STRATEGY:
 This strategy implements a comprehensive exit system with:
 - Multi-Tier Take-Profit: Fixed TP plus trailing stop that tightens at R-multiple milestones
-- Partial Scale-Outs: Take partial profits at predefined R-multiples
+- Partial Scale-Outs: Take 50% profit at 1R and move stop to breakeven
+- R-Multiple-Based Trailing Stops: Tighten trailing stop at 1R, 2R, 3R profit milestones
 - Maximum Hold Period: Time-based exit to prevent holding positions too long
 
 PATTERN FILTERS:
 Added candlestick pattern detection and volume filters:
+- Strong Bar Confirmation: Requires decisive candles with 70%+ body-to-range ratio
+- Directional Alignment: Entry bar must close in the direction of the trade
 - Engulfing, Hammer, and Doji pattern recognition for entry confirmation
 - Volume spike detection to confirm significant market interest
 - Optional pattern and volume requirements for higher-quality trade signals
+
+POSITION SIZING:
+Enhanced volatility-targeted position sizing:
+- ATR-Based Risk: Size positions so dollar risk equals ATR × multiplier
+- Regime-Adaptive: Adjust ATR multiplier based on volatility regime
+- Position Caps: Prevent over-sizing in any market condition 
 """
 
 import numpy as np
@@ -68,6 +77,7 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         volatility_lookback = kwargs.pop('volatility_lookback', 20)
         max_position_size = kwargs.pop('max_position_size', 0.05)
         adaptive_vol_scaling = kwargs.pop('adaptive_vol_scaling', True)
+        atr_multiplier = kwargs.pop('atr_multiplier', 1.5)  # Default ATR multiplier for stop loss calculation
         
         # New exit strategy parameters
         take_profit_r = kwargs.pop('take_profit_r', 2.0)  # Take profit at 2R
@@ -115,6 +125,7 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         self.volatility_lookback = volatility_lookback
         self.max_position_size = max_position_size
         self.adaptive_vol_scaling = adaptive_vol_scaling
+        self.atr_multiplier = atr_multiplier
         
         # Store exit strategy parameters
         self.take_profit_r = take_profit_r
@@ -399,36 +410,63 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         if current_signal == 0:
             return True  # No signal to confirm
             
-        # Check for bullish or bearish patterns based on signal direction
+        # Enhanced Candlestick Confirmation Filter
+        # Check for strong bar characteristics
+        current_bar = df.iloc[idx-1]  # Use previous completed bar for confirmation
+        
+        # Calculate bar strength characteristics
+        bar_range = current_bar['high'] - current_bar['low']
+        if bar_range == 0:  # Avoid division by zero
+            body_to_range_ratio = 0
+        else:
+            body_to_range_ratio = abs(current_bar['close'] - current_bar['open']) / bar_range
+            
+        # Check for decisive candle (strong body)
+        is_strong_candle = body_to_range_ratio > 0.7
+        
+        # Directional alignment - bar should close in signal direction
+        directional_aligned = False
+        if current_signal > 0:  # Long signal
+            directional_aligned = current_bar['close'] > current_bar['open']  # Bullish candle
+        else:  # Short signal
+            directional_aligned = current_bar['close'] < current_bar['open']  # Bearish candle
+            
+        # Check for existing pattern indicators if available
+        pattern_matched = False
         if current_signal > 0:  # Long signal
             # Check for any bullish pattern
-            pattern_matched = df['bullish_pattern'].iloc[idx]
-            
+            if 'bullish_pattern' in df.columns:
+                pattern_matched = df['bullish_pattern'].iloc[idx]
+                
             # Apply additional requirements based on settings
-            if self.require_engulfing and not df['engulfing'].iloc[idx]:
+            if self.require_engulfing and 'engulfing' in df.columns and not df['engulfing'].iloc[idx]:
                 pattern_matched = False
-            if self.require_doji and not df['doji'].iloc[idx]:
+            if self.require_doji and 'doji' in df.columns and not df['doji'].iloc[idx]:
                 pattern_matched = False
-            if self.require_hammer and not df['hammer'].iloc[idx]:
+            if self.require_hammer and 'hammer' in df.columns and not df['hammer'].iloc[idx]:
                 pattern_matched = False
                 
         else:  # Short signal
             # Check for any bearish pattern
-            pattern_matched = df['bearish_pattern'].iloc[idx]
-            
+            if 'bearish_pattern' in df.columns:
+                pattern_matched = df['bearish_pattern'].iloc[idx]
+                
             # Apply additional requirements
-            if self.require_engulfing and not df['engulfing'].iloc[idx]:
+            if self.require_engulfing and 'engulfing' in df.columns and not df['engulfing'].iloc[idx]:
                 pattern_matched = False
-            if self.require_doji and not df['doji'].iloc[idx]:
+            if self.require_doji and 'doji' in df.columns and not df['doji'].iloc[idx]:
                 pattern_matched = False
                 
+        # Combine filters: strong candle + directional alignment OR specific pattern match
+        filter_passed = (is_strong_candle and directional_aligned) or pattern_matched
+        
         # Update stats
-        if pattern_matched:
+        if filter_passed:
             self.confirmation_stats['pattern_confirmed'] += 1
         else:
             self.confirmation_stats['pattern_rejected'] += 1
             
-        return pattern_matched
+        return filter_passed
     
     def check_volume_filter(self, df, idx):
         """
@@ -569,59 +607,76 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
             
         return momentum_confirmed
     
-    def calculate_position_size(self, df, idx, account_balance, risk_pct):
+    def calculate_position_size(self, df, idx, account_balance, risk_pct=None):
         """
-        Calculate position size using volatility targeting.
+        Calculate position size based on account risk and volatility.
         
         Args:
             df: DataFrame with signal data
             idx: Current index
             account_balance: Current account balance
-            risk_pct: Risk percentage per trade (as decimal)
+            risk_pct: Risk percentage per trade (optional)
             
         Returns:
             Position size in base currency
         """
-        if not self.use_volatility_sizing:
-            # Use standard position sizing from parent class
-            return super().calculate_position_size(df, idx, account_balance, risk_pct)
+        # Use instance risk_per_trade if not provided
+        if risk_pct is None:
+            risk_pct = self.risk_per_trade
+            
+        # Calculate dollar risk amount
+        risk_amount = account_balance * risk_pct
         
-        # Get current price
+        # Current price
         current_price = df['close'].iloc[idx]
         
-        # Get volatility (ATR or historical vol)
-        if 'atr' in df.columns and not np.isnan(df['atr'].iloc[idx]):
-            current_volatility = df['atr'].iloc[idx] / current_price  # As percentage of price
+        # Get the ATR if available
+        atr_value = df['atr'].iloc[idx] if 'atr' in df.columns else 0
+        
+        # Enhanced Volatility-Targeted Position Sizing
+        if atr_value > 0 and self.use_volatility_sizing:
+            # ATR-based stop distance
+            atr_multiplier = self.atr_multiplier
+            
+            # Adjust multiplier based on volatility regime if available
+            if 'vol_regime' in df.columns:
+                vol_regime = df['vol_regime'].iloc[idx]
+                if vol_regime == 'LOW':
+                    # Wider stops for low volatility
+                    atr_multiplier *= 1.2  
+                elif vol_regime == 'HIGH':
+                    # Tighter stops for high volatility
+                    atr_multiplier *= 0.8
+            
+            # Calculate dollar-risk per unit based on ATR
+            stop_distance = atr_value * atr_multiplier
+            
+            # Calculate position size to risk exactly risk_amount dollars
+            # If ATR is $100 and we want to risk $200, we size 2 units
+            position_size = risk_amount / stop_distance if stop_distance > 0 else 0
+            
+            # Convert to position size in base currency
+            position_size_base = position_size / current_price if current_price > 0 else 0
         else:
-            # Fallback to historical volatility
-            current_volatility = df['hist_vol'].iloc[idx] if 'hist_vol' in df.columns else 0.01
+            # Fallback to simple percentage-based risk
+            # Assume a default 2% stop loss if no ATR
+            stop_distance = current_price * 0.02  
+            position_size_base = risk_amount / stop_distance if stop_distance > 0 else 0
         
-        # Safety check
-        if current_volatility <= 0:
-            current_volatility = self.volatility_target
+        # Apply reasonability checks
+        # 1. Cap to max position size (percentage of account)
+        max_position_value = account_balance * self.max_position_size
+        position_size_base = min(position_size_base, max_position_value / current_price)
         
-        # Get volatility adjustment factor
-        vol_factor = df['vol_adjustment'].iloc[idx] if 'vol_adjustment' in df.columns else 1.0
+        # 2. Ensure non-negative size
+        position_size_base = max(0, position_size_base)
         
-        # Calculate adjusted risk percentage
-        adjusted_risk = risk_pct * vol_factor
-        
-        # Cap maximum position size
-        adjusted_risk = min(adjusted_risk, self.max_position_size)
-        
-        # Calculate position size
-        position_size = (account_balance * adjusted_risk) / current_price
-        
-        # Update volatility adjustment stats
-        self.confirmation_stats['volatility_adjustments'] += 1
-        
-        # Update regime stats
-        if 'vol_regime' in df.columns:
-            regime = df['vol_regime'].iloc[idx]
-            if regime in self.volatility_regime_stats:
-                self.volatility_regime_stats[regime]['trades'] += 1
-        
-        return position_size
+        # Track volatility adjustments
+        if atr_value > 0 and self.use_volatility_sizing:
+            self.volatility_adjustments += 1
+            self.confirmation_stats['volatility_adjustments'] += 1
+            
+        return position_size_base
     
     def should_place_trade(self, df, idx, mtf_data=None):
         """
@@ -785,25 +840,40 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         # Determine trailing stop distance based on profit achieved
         trail_percentage = 1.0  # Default trail distance (100% of initial trail)
         
+        # Enhanced R-Multiple-Based trailing stops
         if current_profit_r >= 3.0:
+            # Very tight trail at 3R+ (25% of initial)
             trail_percentage = self.r3_trail_pct
         elif current_profit_r >= 2.0:
+            # Tighter trail at 2R+ (50% of initial)
             trail_percentage = self.r2_trail_pct
         elif current_profit_r >= 1.0:
+            # Standard trail at 1R+ (75% of initial)
             trail_percentage = self.r1_trail_pct
             
         # Calculate trailing stop distance
         trail_distance = self.initial_trail_r * r_value * trail_percentage
         
-        # Calculate new stop price
-        if side == 'long':
-            new_stop = current_price - trail_distance
-            # Only move stop up, never down
-            return max(new_stop, stop_loss)
-        else:  # short
-            new_stop = current_price + trail_distance
-            # Only move stop down, never up
-            return min(new_stop, stop_loss)
+        # If we're up 1R+, don't let the stop go below breakeven
+        if current_profit_r >= 1.0:
+            if side == 'long':
+                new_stop = max(current_price - trail_distance, entry_price)
+                # Only move stop up, never down
+                return max(new_stop, stop_loss)
+            else:  # short
+                new_stop = min(current_price + trail_distance, entry_price)
+                # Only move stop down, never up
+                return min(new_stop, stop_loss)
+        else:
+            # Standard trailing stop calculation
+            if side == 'long':
+                new_stop = current_price - trail_distance
+                # Only move stop up, never down
+                return max(new_stop, stop_loss)
+            else:  # short
+                new_stop = current_price + trail_distance
+                # Only move stop down, never up
+                return min(new_stop, stop_loss)
             
     def check_max_hold_time(self, entry_time, current_time, timeframe=None):
         """
@@ -864,6 +934,8 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         entry_time = position.get('entry_time', 0)
         position_size = position.get('size', 0)
         remaining_size = position.get('remaining_size', position_size)
+        half_exited = position.get('half_exited', False)
+        trail_tightened = position.get('trail_tightened', False)
         
         # Current market conditions
         current_price = df['close'].iloc[idx]
@@ -875,7 +947,9 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
             'exit_price': 0,
             'exit_reason': '',
             'exit_size': 0,
-            'remaining_size': remaining_size
+            'remaining_size': remaining_size,
+            'half_exited': half_exited,
+            'trail_tightened': trail_tightened
         }
         
         # Calculate R value
@@ -883,6 +957,39 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
             r_value = entry_price - stop_loss
         else:  # short
             r_value = stop_loss - entry_price
+            
+        # Calculate current profit in R multiples
+        if side == 'long':
+            current_profit_r = (current_price - entry_price) / r_value if r_value > 0 else 0
+        else:  # short
+            current_profit_r = (entry_price - current_price) / r_value if r_value > 0 else 0
+            
+        # New logic: Move stop to breakeven once we're at +1R and took partial profit
+        if current_profit_r >= 1.0 and not half_exited and self.use_partial_exit:
+            # Take 50% profit at +1R
+            exit_size = remaining_size * self.partial_exit_pct
+            exit['exit_triggered'] = True
+            exit['exit_price'] = current_price
+            exit['exit_reason'] = 'Partial Take Profit +1R'
+            exit['exit_size'] = exit_size
+            exit['remaining_size'] = remaining_size - exit_size
+            exit['half_exited'] = True
+            
+            # Move stop to breakeven
+            if side == 'long':
+                stop_loss = max(entry_price, stop_loss)
+            else:
+                stop_loss = min(entry_price, stop_loss)
+                
+            # Update position info
+            position['stop_loss'] = stop_loss
+            return exit
+            
+        # New logic: Tighten trail at +2R if we haven't already
+        if current_profit_r >= 2.0 and not trail_tightened:
+            # Mark trail as tightened - actual tightening happens in calculate_trailing_stop
+            exit['trail_tightened'] = True
+            position['trail_tightened'] = True
             
         # Update trailing stop
         updated_stop = self.calculate_trailing_stop(
@@ -899,12 +1006,12 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
         if stop_triggered:
             exit['exit_triggered'] = True
             exit['exit_price'] = updated_stop
-            exit['exit_reason'] = 'Stop Loss'
+            exit['exit_reason'] = 'Stop Loss' if updated_stop == stop_loss else 'Trailing Stop'
             exit['exit_size'] = remaining_size
             exit['remaining_size'] = 0
             return exit
             
-        # Check take profit hit
+        # Check take profit hit (for remaining position after partial exit)
         if 'main' in take_profits:
             tp_triggered = False
             if side == 'long' and current_price >= take_profits['main']:
@@ -918,23 +1025,6 @@ class HighLeverageStrategy(EnhancedConfirmationStrategy):
                 exit['exit_reason'] = 'Take Profit'
                 exit['exit_size'] = remaining_size
                 exit['remaining_size'] = 0
-                return exit
-                
-        # Check partial exit
-        if self.use_partial_exit and 'partial' in take_profits and remaining_size == position_size:
-            partial_triggered = False
-            if side == 'long' and current_price >= take_profits['partial']:
-                partial_triggered = True
-            elif side == 'short' and current_price <= take_profits['partial']:
-                partial_triggered = True
-                
-            if partial_triggered:
-                exit_size = position_size * self.partial_exit_pct
-                exit['exit_triggered'] = True
-                exit['exit_price'] = take_profits['partial']
-                exit['exit_reason'] = 'Partial Take Profit'
-                exit['exit_size'] = exit_size
-                exit['remaining_size'] = remaining_size - exit_size
                 return exit
                 
         # Check time-based exit
