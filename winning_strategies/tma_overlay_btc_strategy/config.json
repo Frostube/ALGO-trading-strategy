@@ -1,0 +1,60 @@
+{
+    "strategy_name": "TMA_Overlay_Strategy",
+    "timeframe": "1h",
+    "description": "A strategy based on the Triangular Moving Average (TMA) Overlay indicator with dynamic bands and momentum engulfing signals",
+    "performance_metrics": {
+        "estimated_roi": 14.5,
+        "estimated_win_rate": 42.0,
+        "estimated_profit_factor": 1.8,
+        "estimated_sharpe_ratio": 3.8,
+        "estimated_max_drawdown": 6.5
+    },
+    "tma_parameters": {
+        "tma_period": 14,
+        "atr_multiplier": 1.5,
+        "use_std_dev": false,
+        "std_dev_multiplier": 2.0
+    },
+    "ema_parameters": {
+        "fast_period": 8,
+        "slow_period": 21
+    },
+    "signal_parameters": {
+        "use_tma_direction_filter": false,
+        "use_engulfing_filter": false,
+        "use_ema_confirmation": true
+    },
+    "exit_parameters": {
+        "use_band_targets": true,
+        "use_dynamic_trailing_stop": true,
+        "use_multi_tier_exits": true,
+        "profit_tiers": [1.0, 2.0, 3.0],
+        "position_scale_out": [0.4, 0.3, 0.3]
+    },
+    "risk_parameters": {
+        "stop_loss_pct": 0.02,
+        "take_profit_pct": 0.04,
+        "risk_per_trade": 0.02,
+        "position_size_method": "volatility_adjusted",
+        "atr_period": 14,
+        "atr_stop_multiplier": 1.2,
+        "atr_target_multiplier": 3.0
+    },
+    "enhanced_filters": {
+        "use_htf_filter": false,
+        "htf_period": 50,
+        "use_candle_confirmation": false,
+        "candle_body_threshold": 0.7
+    },
+    "session_parameters": {
+        "timezone": "America/Chicago",
+        "session_start_hour": 7,
+        "session_start_minute": 0,
+        "session_end_hour": 12,
+        "session_end_minute": 0,
+        "use_session_filter": false
+    },
+    "traded_symbol": "BTC/USDT",
+    "created_on": "2025-05-22",
+    "tags": ["tma-overlay", "engulfing", "dynamic-bands", "adaptive-exits", "cme-session"]
+} 

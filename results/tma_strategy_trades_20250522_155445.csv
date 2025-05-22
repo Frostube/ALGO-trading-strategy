@@ -1,0 +1,3 @@
+type,datetime,price,balance,position,market_regime,profit_pct
+BUY,2025-05-18 10:00:00,103856.81,1000.0,0.009628641588356085,calm_bullish,
+CLOSE_LONG,2025-05-22 13:00:00,111209.9,1000.681710406635,,,7.0800268176925485
