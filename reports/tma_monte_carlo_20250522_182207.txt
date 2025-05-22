@@ -1,0 +1,24 @@
+=== TMA Overlay Strategy Monte Carlo Validation Results ===
+
+Simulations: 500
+Confidence Level: 95.0%
+Number of Trades: 33
+
+=== Equity Statistics ===
+Initial Capital: $10000.00
+Mean Final Equity: $-113200.45
+Median Final Equity: $-113200.45
+Lower Bound Equity (2.5%): $-113200.45
+Upper Bound Equity (97.5%): $-113200.45
+
+=== Risk Statistics ===
+Mean Max Drawdown: 957.86%
+Worst-case Max Drawdown (97.5%): 1497.92%
+Mean Win Rate: 39.39%
+
+=== Robustness Assessment ===
+Robustness Ratio: -11.32
+Robustness Assessment: WEAK
+
+The TMA Overlay strategy lacks statistical robustness and needs significant improvement.
+Consider adjusting parameters or exploring different approaches.
