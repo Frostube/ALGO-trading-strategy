@@ -1,0 +1,323 @@
+//@version=5
+strategy("PPP and RSI Breakout Strategy Optimized for BTC", overlay=true, initial_capital=10000, default_qty_value=100, default_qty_type=strategy.percent_of_equity, precision=8)
+
+// =====================================================
+// Input Parameters
+// =====================================================
+
+// General Settings
+var generalSettings = "General Settings"
+useStrategy = input.bool(true, "Enable Strategy (On/Off)", group=generalSettings)
+useTPSL = input.bool(true, "Use Take Profit/Stop Loss", group=generalSettings)
+timeframe_filter = input.bool(true, "Use Timeframe Filter (30min optimized)", group=generalSettings)
+
+// PPP Settings
+var pppSettings = "PPP Settings"
+lookback_period = input.int(150, "PPP Lookback Period", minval=50, maxval=500, group=pppSettings, tooltip="Optimized for 30min BTC/USDT")
+extreme_low = input.float(5, "Extremely Low Threshold (%)", minval=1, maxval=20, step=1, group=pppSettings)
+low_threshold = input.float(20, "Low Threshold (%)", minval=10, maxval=40, step=1, group=pppSettings, tooltip="Adjusted from 25% to 20% for crypto")
+neutral_high = input.float(80, "High Threshold (%)", minval=60, maxval=90, step=1, group=pppSettings, tooltip="Adjusted from 75% to 80% for crypto")
+extreme_high = input.float(95, "Extremely High Threshold (%)", minval=80, maxval=99, step=1, group=pppSettings)
+
+// RSI Settings
+var rsiSettings = "RSI Settings"
+sma_length = input.int(100, "SMA Length", minval=50, maxval=500, group=rsiSettings, tooltip="Reduced from 200 to 100 for 30min timeframe")
+rsi_length = input.int(14, "RSI Length", minval=5, maxval=50, group=rsiSettings)
+rsi_entry = input.int(30, "RSI Entry Level", minval=20, maxval=40, group=rsiSettings, tooltip="Adjusted from 34 to 30 for more sensitive entries")
+rsi_stop_loss = input.int(25, "RSI Stop Loss Level", minval=10, maxval=35, group=rsiSettings, tooltip="Adjusted from 30 to 25 for better exits")
+rsi_take_profit = input.int(55, "RSI Take Profit Level", minval=45, maxval=70, group=rsiSettings, tooltip="Adjusted from 50 to 55 for BTC volatility")
+
+// Risk Management
+var riskSettings = "Risk Management"
+take_profit_pct = input.float(3.5, "Take Profit %", minval=0.5, maxval=20.0, step=0.5, group=riskSettings, tooltip="Increased from 3.0% to 3.5% for crypto")
+stop_loss_pct = input.float(1.25, "Stop Loss %", minval=0.5, maxval=10.0, step=0.25, group=riskSettings, tooltip="Adjusted from 1.5% to 1.25% to reduce drawdown")
+use_trailing_stop = input.bool(true, "Use Trailing Stop", group=riskSettings)
+trailing_stop_pct = input.float(1.2, "Trailing Stop %", minval=0.5, maxval=5.0, step=0.1, group=riskSettings, tooltip="Increased from 1.0% to 1.2% for crypto")
+
+// Volatility Filter
+var volatilitySettings = "Volatility Filter"
+use_volatility_filter = input.bool(true, "Use Volatility Filter", group=volatilitySettings, tooltip="Filter out high volatility periods")
+volatility_multiplier = input.float(2.0, "Volatility Multiplier", minval=1.0, maxval=5.0, step=0.1, group=volatilitySettings, tooltip="Higher values = stricter filter")
+volatility_length = input.int(30, "Volatility Lookback", minval=10, maxval=100, group=volatilitySettings)
+
+// =====================================================
+// Timeframe Filtering
+// =====================================================
+is_allowed_timeframe = true
+if timeframe_filter
+    current_tf = timeframe.period
+    is_allowed_timeframe := current_tf == "30" or current_tf == "60" or current_tf == "120" or current_tf == "240"
+
+// =====================================================
+// PPP Calculation
+// =====================================================
+source = close
+
+// Calculate current percentile for each bar
+curr_percentile = 0.0
+price_count = 0.0
+
+for i = 0 to lookback_period - 1
+    if source[i] < source
+        price_count += 1.0
+        
+curr_percentile := (price_count / lookback_period) * 100.0
+
+// Calculate price points at each percentile dynamically
+p_extremely_low = ta.percentile_linear_interpolation(source, lookback_period, extreme_low)
+p_low = ta.percentile_linear_interpolation(source, lookback_period, low_threshold)
+p_neutral_high = ta.percentile_linear_interpolation(source, lookback_period, neutral_high)
+p_extremely_high = ta.percentile_linear_interpolation(source, lookback_period, extreme_high)
+
+// =====================================================
+// RSI Calculation and Enhanced Signals
+// =====================================================
+sma_value = ta.sma(close, sma_length)
+rsi_value = ta.rsi(close, rsi_length)
+
+// Dynamic RSI bands based on volatility - adjust threshold in volatile markets
+rsi_volatility = ta.sma(ta.stdev(rsi_value, 14), 5)
+dynamic_rsi_entry = rsi_entry - math.min(rsi_volatility, 5)
+dynamic_rsi_tp = rsi_take_profit + math.min(rsi_volatility, 10)
+
+// =====================================================
+// Market Condition Analysis
+// =====================================================
+
+// Enhanced market condition analysis
+price_vs_sma = close / sma_value
+volatility = ta.stdev(close / close[1] - 1, 20) * 100
+avg_volatility = ta.sma(volatility, volatility_length)
+high_volatility = volatility > avg_volatility * volatility_multiplier
+
+// ADX for trend strength
+adx_length = 14
+dip = ta.change(low)
+dim = -ta.change(high)
+plus_dm = dip > 0 and dip > dim ? dip : 0
+minus_dm = dim > 0 and dim > dip ? dim : 0
+tr = math.max(math.max(high - low, math.abs(high - close[1])), math.abs(low - close[1]))
+plus_di = 100 * ta.ema(plus_dm, adx_length) / ta.ema(tr, adx_length)
+minus_di = 100 * ta.ema(minus_dm, adx_length) / ta.ema(tr, adx_length)
+dx = 100 * math.abs(plus_di - minus_di) / (plus_di + minus_di)
+adx = ta.ema(dx, adx_length)
+
+// Improved trend detection
+is_strong_trend = adx > 25
+price_trend = ta.ema(close, 21) > ta.ema(close, 55) ? 1 : ta.ema(close, 21) < ta.ema(close, 55) ? -1 : 0
+
+// Determine if market is trending or range-bound with enhanced criteria
+is_trending = is_strong_trend or (volatility > ta.sma(volatility, 100) * 1.1 and math.abs(price_vs_sma - 1) > 0.03)
+is_range_bound = not is_trending
+
+// =====================================================
+// Entry Conditions with Enhanced Filters
+// =====================================================
+
+// Long entry conditions
+long_ppp_condition = curr_percentile < low_threshold // PPP below 20%
+long_rsi_condition = ta.crossover(rsi_value, dynamic_rsi_entry) and close > sma_value
+
+// Short entry conditions
+short_ppp_condition = curr_percentile > neutral_high // PPP above 80%
+short_rsi_condition = ta.crossunder(rsi_value, 100 - dynamic_rsi_entry) and close < sma_value
+
+// Volatility filter - don't enter during extreme volatility
+volatility_filter_pass = use_volatility_filter ? not high_volatility : true
+
+// Combined entry conditions based on market state and filters
+long_entry = volatility_filter_pass and is_allowed_timeframe and ((is_range_bound and long_ppp_condition) or (is_trending and long_rsi_condition and price_trend > 0))
+
+short_entry = volatility_filter_pass and is_allowed_timeframe and ((is_range_bound and short_ppp_condition) or (is_trending and short_rsi_condition and price_trend < 0))
+
+// =====================================================
+// Strategy Execution
+// =====================================================
+
+// Variables for trailing stop
+var float long_trail_price = na
+var float short_trail_price = na
+
+// Strategy entry
+if useStrategy and long_entry and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+    long_trail_price := close * (1 - trailing_stop_pct / 100)
+    
+if useStrategy and short_entry and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+    short_trail_price := close * (1 + trailing_stop_pct / 100)
+
+// Calculate dynamic take profit and stop loss based on current volatility
+vol_factor = math.min(volatility / avg_volatility, 1.5)
+dynamic_tp_pct = take_profit_pct * vol_factor
+dynamic_sl_pct = stop_loss_pct * vol_factor
+
+// Take profit and stop loss
+long_take_profit = strategy.position_avg_price * (1 + dynamic_tp_pct / 100)
+long_stop_loss = strategy.position_avg_price * (1 - dynamic_sl_pct / 100)
+short_take_profit = strategy.position_avg_price * (1 - dynamic_tp_pct / 100)
+short_stop_loss = strategy.position_avg_price * (1 + dynamic_sl_pct / 100)
+
+// Update trailing stops
+if strategy.position_size > 0 and use_trailing_stop
+    long_trail_price := math.max(long_trail_price, close * (1 - trailing_stop_pct / 100))
+if strategy.position_size < 0 and use_trailing_stop
+    short_trail_price := math.min(short_trail_price, close * (1 + trailing_stop_pct / 100))
+
+// RSI-based exit for long positions with dynamic take profit
+rsi_long_exit = rsi_value >= dynamic_rsi_tp or rsi_value <= rsi_stop_loss
+
+// RSI-based exit for short positions with dynamic take profit
+rsi_short_exit = rsi_value <= (100 - dynamic_rsi_tp) or rsi_value >= (100 - rsi_stop_loss)
+
+// Additional exit during high volatility periods
+exit_on_extreme_volatility = use_volatility_filter and high_volatility and volatility > avg_volatility * 2.5
+
+// Exit conditions
+if useStrategy and strategy.position_size > 0
+    if useTPSL and close <= long_stop_loss
+        strategy.close("Long", comment="Stop Loss")
+    if useTPSL and close >= long_take_profit
+        strategy.close("Long", comment="Take Profit")
+    if use_trailing_stop and close < long_trail_price
+        strategy.close("Long", comment="Trailing Stop")
+    if is_trending and rsi_long_exit
+        strategy.close("Long", comment="RSI Exit")
+    if exit_on_extreme_volatility
+        strategy.close("Long", comment="Volatility Exit")
+
+if useStrategy and strategy.position_size < 0
+    if useTPSL and close >= short_stop_loss
+        strategy.close("Short", comment="Stop Loss")
+    if useTPSL and close <= short_take_profit
+        strategy.close("Short", comment="Take Profit")
+    if use_trailing_stop and close > short_trail_price
+        strategy.close("Short", comment="Trailing Stop")
+    if is_trending and rsi_short_exit
+        strategy.close("Short", comment="RSI Exit")
+    if exit_on_extreme_volatility
+        strategy.close("Short", comment="Volatility Exit")
+
+// =====================================================
+// Visualization
+// =====================================================
+
+// PPP Zone Colors
+color color_extremely_low = color.new(#1E88E5, 0)  // Blue
+color color_low = color.new(#00ACC1, 0)            // Cyan
+color color_neutral = color.new(#4CAF50, 0)        // Green
+color color_high = color.new(#FB8C00, 0)           // Orange
+color color_extremely_high = color.new(#F44336, 0) // Red
+
+// Apply transparency to zone fills
+color color_zone_extremely_low = color.new(color_extremely_low, 85)
+color color_zone_low = color.new(color_low, 85)
+color color_zone_neutral = color.new(color_neutral, 85)
+color color_zone_high = color.new(color_high, 85)
+color color_zone_extremely_high = color.new(color_extremely_high, 85)
+
+// Plot PPP zones
+p_line_extremely_low = plot(p_extremely_low, "Extremely Low Percentile", color=color_extremely_low, linewidth=1)
+p_line_low = plot(p_low, "Low Percentile", color=color_low, linewidth=1)
+p_line_neutral_high = plot(p_neutral_high, "High Percentile", color=color_high, linewidth=1)
+p_line_extremely_high = plot(p_extremely_high, "Extremely High Percentile", color=color_extremely_high, linewidth=1)
+
+// Fill between lines with colors
+fill(p_line_extremely_low, p_line_low, color=color_zone_extremely_low, title="Extremely Low Zone")
+fill(p_line_low, p_line_neutral_high, color=color_zone_neutral, title="Neutral Zone")
+fill(p_line_neutral_high, p_line_extremely_high, color=color_zone_high, title="High Zone")
+
+// Plot SMA
+plot(sma_value, "SMA", color=color.new(color.white, 0), linewidth=2)
+
+// Plot market condition
+plotshape(series=is_trending, title="Trending Market", location=location.bottom, color=color.new(color.orange, 0), style=shape.circle, size=size.tiny)
+plotshape(series=is_range_bound, title="Range-Bound Market", location=location.bottom, color=color.new(color.lime, 0), style=shape.circle, size=size.tiny)
+
+// Plot entry signals with filtering
+plotshape(series=long_entry, title="Long Signal", location=location.belowbar, color=color.new(color.green, 0), style=shape.triangleup, size=size.small)
+plotshape(series=short_entry, title="Short Signal", location=location.abovebar, color=color.new(color.red, 0), style=shape.triangledown, size=size.small)
+
+// Plot volatility filter status
+bgcolor(high_volatility ? color.new(color.red, 95) : na, title="High Volatility")
+
+// =====================================================
+// Information Table (only on last bar)
+// =====================================================
+if barstate.islast
+    // Market status based on current percentile
+    var string market_status = ""
+    var color status_color = color.white
+    
+    if not na(curr_percentile)
+        if curr_percentile <= extreme_low
+            market_status := "EXTREMELY LOW ZONE (OVERSOLD)"
+            status_color := color_extremely_low
+        else if curr_percentile <= low_threshold
+            market_status := "LOW ZONE (ACCUMULATION)"
+            status_color := color_low
+        else if curr_percentile <= neutral_high
+            market_status := "NEUTRAL ZONE (FAIR VALUE)"
+            status_color := color_neutral
+        else if curr_percentile <= extreme_high
+            market_status := "HIGH ZONE (DISTRIBUTION)"
+            status_color := color_high
+        else
+            market_status := "EXTREMELY HIGH ZONE (BUBBLE)"
+            status_color := color_extremely_high
+    
+    // Create table
+    var table infoTable = table.new(position.top_right, 2, 7, 
+                                   bgcolor=color.new(color.black, 80), 
+                                   border_width=1, 
+                                   border_color=color.new(color.gray, 70))
+    
+    // Current market condition
+    table.cell(infoTable, 0, 0, "Market Condition", 
+              text_color=color.white, 
+              bgcolor=color.new(color.gray, 50))
+    table.cell(infoTable, 1, 0, is_trending ? "TRENDING" : "RANGE-BOUND", 
+              text_color=is_trending ? color.orange : color.lime, 
+              bgcolor=color.new(color.gray, 50))
+    
+    // Current PPP status
+    table.cell(infoTable, 0, 1, "Price Position", 
+              text_color=color.white)
+    table.cell(infoTable, 1, 1, market_status, 
+              text_color=status_color)
+    
+    // Price and Percentile
+    table.cell(infoTable, 0, 2, "Current Price", 
+              text_color=color.white)
+    table.cell(infoTable, 1, 2, str.tostring(close, "#.##") + " (" + str.tostring(math.round(curr_percentile, 2)) + "%)", 
+              text_color=status_color)
+    
+    // RSI Value
+    table.cell(infoTable, 0, 3, "RSI Value", 
+              text_color=color.white)
+    table.cell(infoTable, 1, 3, str.tostring(math.round(rsi_value, 2)), 
+              text_color=rsi_value < 30 ? color.green : rsi_value > 70 ? color.red : color.white)
+    
+    // Volatility Status
+    table.cell(infoTable, 0, 4, "Volatility", 
+              text_color=color.white)
+    table.cell(infoTable, 1, 4, high_volatility ? "HIGH" : "NORMAL", 
+              text_color=high_volatility ? color.red : color.green)
+    
+    // Dynamic Values
+    table.cell(infoTable, 0, 5, "Dynamic TP/SL", 
+              text_color=color.white)
+    table.cell(infoTable, 1, 5, str.tostring(math.round(dynamic_tp_pct, 2)) + "% / " + str.tostring(math.round(dynamic_sl_pct, 2)) + "%", 
+              text_color=color.white)
+    
+    // Active Strategy
+    table.cell(infoTable, 0, 6, "Active Strategy", 
+              text_color=color.white)
+    table.cell(infoTable, 1, 6, is_trending ? "RSI BREAKOUT" : "PPP POSITION", 
+              text_color=is_trending ? color.orange : color.lime)
+
+
+
+
+
+
