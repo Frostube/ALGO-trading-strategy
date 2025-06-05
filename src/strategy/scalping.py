@@ -41,8 +41,12 @@ class ScalpingStrategy:
         Returns:
             dict: Current strategy state and signals
         """
-        # Apply indicators to the data
-        df_with_indicators = apply_indicators(df)
+        # Compute indicators but keep any precomputed columns provided in df
+        indicators = apply_indicators(df)
+        df_with_indicators = df.copy()
+        for col in indicators.columns:
+            if col not in df_with_indicators.columns:
+                df_with_indicators[col] = indicators[col]
         
         # If higher timeframe data is provided, use it for trend confirmation
         if higher_tf_df is not None:
@@ -260,9 +264,15 @@ class ScalpingStrategy:
         if self.active_trade:
             logger.warning("Attempted to open trade while another is active")
             return
-        
+
         side = signal['signal']  # 'buy' or 'sell'
-        current_price = bar_data['close']
+
+        # Support passing a raw price instead of a bar dictionary for tests
+        if isinstance(bar_data, (int, float)):
+            current_price = bar_data
+            bar_data = {}
+        else:
+            current_price = bar_data['close']
         
         # Calculate stop loss and take profit levels
         if USE_ATR_STOPS and 'atr' in bar_data and not pd.isna(bar_data['atr']):
@@ -357,11 +367,18 @@ class ScalpingStrategy:
         self.active_trade['id'] = db_trade.id
         
         logger.info(f"Opened {side} trade at {current_price} with SL: {stop_loss_price}, TP: {take_profit_price}")
-        logger.info(f"Market conditions: RSI={rsi_value:.1f}, ATR={atr_value:.2f}, "
-                  f"Trend={'Up' if market_trend > 0 else 'Down'}, "
-                  f"Higher TF={'Up' if self.higher_tf_trend > 0 else 'Down' if self.higher_tf_trend < 0 else 'Neutral'}, "
-                  f"Micro-trend={'Up' if signal.get('micro_trend', 0) > 0 else 'Down'}, "
-                  f"Momentum: {'Confirmed' if self.active_trade['momentum_signal'] else 'Not confirmed'}")
+
+        # Safely format optional values for logging
+        rsi_display = f"{rsi_value:.1f}" if rsi_value is not None else "n/a"
+        atr_display = f"{atr_value:.2f}" if atr_value is not None else "n/a"
+
+        logger.info(
+            f"Market conditions: RSI={rsi_display}, ATR={atr_display}, "
+            f"Trend={'Up' if market_trend > 0 else 'Down'}, "
+            f"Higher TF={'Up' if (self.higher_tf_trend or 0) > 0 else 'Down' if (self.higher_tf_trend or 0) < 0 else 'Neutral'}, "
+            f"Micro-trend={'Up' if signal.get('micro_trend', 0) > 0 else 'Down'}, "
+            f"Momentum: {'Confirmed' if self.active_trade['momentum_signal'] else 'Not confirmed'}"
+        )
         
         return self.active_trade
     
