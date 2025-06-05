@@ -126,4 +126,5 @@ DRAWDOWN_TARGET = 0.15  # Target max drawdown of 15%
 TRADES_PER_MONTH_TARGET = 10  # Target 10 trades per month per symbol
 
 # Risk management parameters
-USE_SOFT_STOP = True  # Enable soft stop alerts for manual intervention 
+USE_SOFT_STOP = True  # Enable soft stop alerts for manual intervention
+ADAPTIVE_LOOKBACK = 100
