@@ -41,6 +41,10 @@ VOL_RATIO_MIN = 1.2  # Optimal volume threshold from grid search
 VOLUME_THRESHOLD = 1.5  # Standard volume threshold
 ATR_PERIOD = 14  # Standard ATR period
 
+# Adaptive threshold settings
+USE_ADAPTIVE_THRESHOLDS = False  # Use percentile-based thresholds for RSI and volume
+ADAPTIVE_LOOKBACK = 100  # Lookback period for adaptive thresholds
+
 # Order execution settings
 ORDER_TIMEOUT_MS = 700  # Maker order timeout in milliseconds
 
