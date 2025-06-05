@@ -88,12 +88,17 @@ def test_volume_ma_calculation(sample_data):
     )
     
     # Check volume ratio calculation
-    assert all(df['volume_ratio'] == df['volume'] / df['volume_ma'])
+    expected_ratio = df['volume'] / df['volume_ma']
+    pd.testing.assert_series_equal(
+        df['volume_ratio'].dropna().reset_index(drop=True),
+        expected_ratio.dropna().reset_index(drop=True),
+        check_names=False
+    )
     
     # Set a test case for volume spike
-    df.loc[50, 'volume'] = df.loc[50, 'volume_ma'] * 2  # Create a volume spike
+    df.loc[df.index[50], 'volume'] = df.loc[df.index[50], 'volume_ma'] * 2  # Create a volume spike
     df = calculate_volume_ma(df, period=20)  # Recalculate
-    assert df.loc[50, 'volume_spike'] == True
+    assert df.loc[df.index[50], 'volume_spike'] == True
 
 def test_get_signal(sample_data):
     """Test signal generation."""
