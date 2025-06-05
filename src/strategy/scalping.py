@@ -262,12 +262,19 @@ class ScalpingStrategy:
             return
         
         side = signal['signal']  # 'buy' or 'sell'
-        current_price = bar_data['close']
+
+        # Allow passing just a price value in tests
+        if isinstance(bar_data, (int, float)):
+            current_price = float(bar_data)
+            bar_info = {}
+        else:
+            current_price = bar_data['close']
+            bar_info = bar_data
         
         # Calculate stop loss and take profit levels
-        if USE_ATR_STOPS and 'atr' in bar_data and not pd.isna(bar_data['atr']):
+        if USE_ATR_STOPS and 'atr' in bar_info and not pd.isna(bar_info['atr']):
             # Use ATR-based stops
-            atr_value = bar_data['atr']
+            atr_value = bar_info['atr']
             
             if side == 'buy':
                 stop_loss_price = current_price - (atr_value * ATR_SL_MULTIPLIER)
@@ -303,9 +310,9 @@ class ScalpingStrategy:
         notional_value = position_size * current_price
         
         # Get market trend and RSI values
-        market_trend = bar_data.get('market_trend', 0)
-        rsi_value = bar_data.get('rsi', None)
-        atr_value = bar_data.get('atr', None)
+        market_trend = bar_info.get('market_trend', 0)
+        rsi_value = bar_info.get('rsi', None)
+        atr_value = bar_info.get('atr', None)
         
         # Record the trade
         self.active_trade = {
@@ -356,12 +363,20 @@ class ScalpingStrategy:
         # Update trade with ID from database
         self.active_trade['id'] = db_trade.id
         
-        logger.info(f"Opened {side} trade at {current_price} with SL: {stop_loss_price}, TP: {take_profit_price}")
-        logger.info(f"Market conditions: RSI={rsi_value:.1f}, ATR={atr_value:.2f}, "
-                  f"Trend={'Up' if market_trend > 0 else 'Down'}, "
-                  f"Higher TF={'Up' if self.higher_tf_trend > 0 else 'Down' if self.higher_tf_trend < 0 else 'Neutral'}, "
-                  f"Micro-trend={'Up' if signal.get('micro_trend', 0) > 0 else 'Down'}, "
-                  f"Momentum: {'Confirmed' if self.active_trade['momentum_signal'] else 'Not confirmed'}")
+        logger.info(
+            f"Opened {side} trade at {current_price} with SL: {stop_loss_price}, TP: {take_profit_price}"
+        )
+
+        rsi_disp = f"{rsi_value:.1f}" if rsi_value is not None else "n/a"
+        atr_disp = f"{atr_value:.2f}" if atr_value is not None else "n/a"
+
+        logger.info(
+            f"Market conditions: RSI={rsi_disp}, ATR={atr_disp}, "
+            f"Trend={'Up' if market_trend > 0 else 'Down'}, "
+            f"Higher TF={'Up' if self.higher_tf_trend > 0 else 'Down' if self.higher_tf_trend < 0 else 'Neutral'}, "
+            f"Micro-trend={'Up' if signal.get('micro_trend', 0) > 0 else 'Down'}, "
+            f"Momentum: {'Confirmed' if self.active_trade['momentum_signal'] else 'Not confirmed'}"
+        )
         
         return self.active_trade
     
