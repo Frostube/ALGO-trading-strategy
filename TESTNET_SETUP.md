@@ -34,4 +34,4 @@ This guide will help you set up Binance testnet API keys for your trading bot wi
 - Testnet accounts have unlimited paper funds
 - The testnet environment behaves like real Binance but with simulated market data
 - API keys expire periodically; generate new ones if you encounter authentication errors
-- No real trading occurs in testnet mode 
+- No real trading occurs in testnet mode
