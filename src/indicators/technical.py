@@ -884,17 +884,17 @@ def get_signal(df, index=-1, last_signal_time=None, min_bars_between=MIN_BARS_BE
         signal['strategy'] = 'multi_ma_trend'
     
     # STRATEGY 3: Mean-reversion for RSI extremes - LESS RESTRICTIVE
-    # Mean reversion buy with fewer conditions
+    # Mean reversion buy with fewer conditions (require bullish candle only if available)
     elif (bars_since_allowed and
-          _safe_compare(row['rsi'], 30, operator.lt) and  # Oversold
-          row.get('bullish_candle', False)):  # Just need a bullish candle
+          _safe_compare(row['rsi'], 30, operator.lt) and
+          row.get('bullish_candle', True)):
         signal['signal'] = 'buy'
         signal['strategy'] = 'mean_reversion'
-    
-    # Mean reversion sell with fewer conditions
+
+    # Mean reversion sell with fewer conditions (require bearish candle only if available)
     elif (bars_since_allowed and
-          _safe_compare(row['rsi'], 70, operator.gt) and  # Overbought
-          row.get('bearish_candle', False)):  # Just need a bearish candle
+          _safe_compare(row['rsi'], 70, operator.gt) and
+          row.get('bearish_candle', True)):
         signal['signal'] = 'sell'
         signal['strategy'] = 'mean_reversion'
     
