@@ -18,6 +18,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 from .ema_crossover import EMACrossoverStrategy
 from .base_strategy import BaseStrategy
 from src.strategy.rsi_strategy import RSIOscillatorStrategy
+from .bollinger_breakout import BollingerBreakoutStrategy
 from src.utils.health_monitor import StrategyHealthMonitor
 
 logger = logging.getLogger('trading_bot')
@@ -50,6 +51,7 @@ class StrategyFactory:
         self.strategies = {
             'ema_crossover': EMACrossoverStrategy,
             'rsi_oscillator': RSIOscillatorStrategy,
+            'bollinger_breakout': BollingerBreakoutStrategy,
         }
         
         # Discover other strategies in the strategy directory
